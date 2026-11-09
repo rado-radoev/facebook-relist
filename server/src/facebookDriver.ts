@@ -38,11 +38,13 @@ export const CREATE_LISTING_URL = "https://www.facebook.com/marketplace/create/i
 export type CreateOutcome =
   | { kind: "created"; listingId: string; url: string }
   | { kind: "dry_run" }
+  | { kind: "blocked"; reason: string }
   | { kind: "unknown"; reason: string };
 
 export type DeleteOutcome =
   | { kind: "deleted" }
   | { kind: "dry_run" }
+  | { kind: "unknown"; reason: string }
   | { kind: "not_deleted"; reason: string };
 
 export interface VerifyResult {
@@ -50,12 +52,49 @@ export interface VerifyResult {
   oldGone: boolean;
   /** The new listing appears in the person's selling list. */
   newListed: boolean;
+  /** True only when the selling-list read positively completed. */
+  complete: boolean;
+  newListingId: string | null;
+  newSellerId: string | null;
+  newPayloadHash: string | null;
+}
+
+export interface NewListingCheck {
+  state: "verified" | "unknown";
+  listingId: string | null;
+  sellerMatchesOwner: boolean | null;
+  payloadHash: string | null;
+}
+
+export interface RecreateOriginalSnapshot {
+  id: string;
+  title: string;
+  price: string;
+  status: string;
+  photoUrl: string;
+  url: string;
+}
+
+export interface ListingObservation {
+  state: "present" | "absent" | "unknown";
+  id: string | null;
+  sellerId: string | null;
+  status: ListingAvailability;
+  payloadHash: string | null;
+  title: string | null;
+  price: string | null;
+  photoUrl: string | null;
+  url: string | null;
+  complete: boolean;
 }
 
 export interface MarketplaceDriver {
   /** A selling-list card that looks like the copy this job is creating
    *  (duplicate guard), or null. Never returns the job's own old listing. */
-  findPossibleDuplicate(userId: string, fp: ListingFingerprint): Promise<SyncedListing | null>;
+  findPossibleDuplicate(
+    userId: string,
+    fp: ListingFingerprint,
+  ): Promise<SyncedListing | null | { kind: "unknown"; reason: string }>;
   /** Drive Facebook's create flow. In dry-run, walk every step but stop
    *  before the final submit. photoPaths are absolute archive paths. */
   createListing(
@@ -69,7 +108,11 @@ export interface MarketplaceDriver {
   checkListing(userId: string, listingId: string): Promise<ListingAvailability>;
   /** Whether a listing still appears in the person's selling list —
    *  the delete step's target check for the OLD listing. */
-  listingStillListed(userId: string, listingId: string): Promise<boolean>;
+  listingStillListed(userId: string, listingId: string): Promise<boolean | "unknown">;
+  /** Fresh, exact comparison; incomplete source data must return unknown. */
+  checkOriginalUnchanged(userId: string, original: RecreateOriginalSnapshot): Promise<"unchanged" | "changed" | "unknown">;
+  /** Exact replacement ID, owner and payload attestation. */
+  verifyNewListing(userId: string, listingId: string, url: string, payloadHash: string): Promise<NewListingCheck>;
   /** Post-delete verification: old gone from the selling list, new in it. */
   verifyRecreate(userId: string, oldListingId: string, newListingId: string): Promise<VerifyResult>;
   /** Delete a listing. In dry-run, open the delete flow but stop before
@@ -212,6 +255,59 @@ export const DELETE_CONFIRM_SCRIPT = `/* relist-delete-confirm */ (() => {
 
 const ITEM_ID_PATTERN = /\/marketplace\/item\/(\d+)/;
 
+interface SellingListEvidence {
+  surface?: {
+    kind?: string;
+    listingId?: string | null;
+    readiness?: string;
+  };
+  completion?: {
+    state?: string;
+    expectedCount?: number | null;
+    observedCount?: number;
+  };
+}
+
+function isCompleteSellingList(
+  snapshot: PageSnapshot,
+): snapshot is PageSnapshot & { sellingCards: NonNullable<PageSnapshot["sellingCards"]> } {
+  let url: URL;
+  try {
+    url = new URL(snapshot.url);
+  } catch {
+    return false;
+  }
+  const evidence = snapshot as PageSnapshot & SellingListEvidence;
+  const completion = evidence.completion;
+  return (
+    url.protocol === "https:" &&
+    ["facebook.com", "www.facebook.com"].includes(url.hostname) &&
+    url.pathname.replace(/\/$/, "") === "/marketplace/you/selling" &&
+    !url.search &&
+    !url.hash &&
+    evidence.surface?.kind === "selling_list" &&
+    evidence.surface.readiness === "ready" &&
+    Array.isArray(snapshot.sellingCards) &&
+    completion?.state === "complete" &&
+    Number.isInteger(completion.expectedCount) &&
+    completion.expectedCount === snapshot.sellingCards.length &&
+    completion.observedCount === snapshot.sellingCards.length
+  );
+}
+
+function isExpectedListingSurface(snapshot: PageSnapshot, listingId: string): boolean {
+  const evidence = snapshot as PageSnapshot & SellingListEvidence;
+  return (
+    evidence.surface?.kind === "listing" &&
+    evidence.surface.listingId === listingId &&
+    evidence.surface.readiness === "ready"
+  );
+}
+
+// Intentionally not configurable through environment, request, or constructor.
+// Real Facebook writes remain closed until a separately reviewed release.
+const LIVE_MUTATIONS_ENABLED = false;
+
 // ---------------------------------------------------------------------------
 // Real driver
 
@@ -254,9 +350,13 @@ export class FacebookDriver implements MarketplaceDriver {
   async findPossibleDuplicate(
     userId: string,
     fp: ListingFingerprint,
-  ): Promise<SyncedListing | null> {
+  ): Promise<SyncedListing | null | { kind: "unknown"; reason: string }> {
     await this.requireConnected(userId);
-    const cards = await this.sellingCards(userId);
+    const snapshot = await this.browser.collectSnapshotAt(userId, SELLING_LIST_URL);
+    if (!snapshot || !isCompleteSellingList(snapshot)) {
+      return { kind: "unknown", reason: "The selling-list snapshot is missing or incomplete." };
+    }
+    const cards = parseSellingCards(snapshot.sellingCards, this.now());
     const today = this.now().toISOString().slice(0, 10);
     for (const card of cards) {
       if (matchesFingerprint(card, fp, today)) {
@@ -273,6 +373,15 @@ export class FacebookDriver implements MarketplaceDriver {
     videoPath: string | null,
     options: { dryRun: boolean },
   ): Promise<CreateOutcome> {
+    if (options.dryRun) {
+      return { kind: "dry_run" };
+    }
+    if (!LIVE_MUTATIONS_ENABLED) {
+      return {
+        kind: "blocked",
+        reason: "Live Facebook listing creation is disabled by the server release gate.",
+      };
+    }
     await this.requireConnected(userId);
     const start = await this.browser.collectSnapshotAt(userId, CREATE_LISTING_URL);
     if (!start) {
@@ -388,13 +497,53 @@ export class FacebookDriver implements MarketplaceDriver {
     if (!snapshot) {
       return "unknown";
     }
-    return interpretListingAvailability(snapshot);
+    if (!isExpectedListingSurface(snapshot, listingId)) {
+      return "unknown";
+    }
+    return interpretListingAvailability(snapshot, listingId);
   }
 
-  async listingStillListed(userId: string, listingId: string): Promise<boolean> {
+  async listingStillListed(userId: string, listingId: string): Promise<boolean | "unknown"> {
     await this.requireConnected(userId);
-    const cards = await this.sellingCards(userId);
+    const snapshot = await this.browser.collectSnapshotAt(userId, SELLING_LIST_URL);
+    if (!snapshot || !isCompleteSellingList(snapshot)) {
+      return "unknown";
+    }
+    const cards = parseSellingCards(snapshot.sellingCards, this.now());
     return cards.some((card) => card.id === listingId);
+  }
+
+  async checkOriginalUnchanged(
+    userId: string,
+    original: RecreateOriginalSnapshot,
+  ): Promise<"unchanged" | "changed" | "unknown"> {
+    await this.requireConnected(userId);
+    const snapshot = await this.browser.collectSnapshotAt(userId, SELLING_LIST_URL);
+    if (!snapshot || !isCompleteSellingList(snapshot)) {
+      return "unknown";
+    }
+    const card = parseSellingCards(snapshot.sellingCards, this.now()).find((entry) => entry.id === original.id);
+    if (!card) {
+      return "unknown";
+    }
+    return card.title === original.title &&
+      card.price === original.price &&
+      card.status === original.status &&
+      card.photoUrl === original.photoUrl &&
+      card.url === original.url
+      ? "unchanged"
+      : "changed";
+  }
+
+  async verifyNewListing(
+    _userId: string,
+    _listingId: string,
+    _url: string,
+    _payloadHash: string,
+  ): Promise<NewListingCheck> {
+    // Current extraction DTO cannot attest seller identity or full payload.
+    // Do not infer either from a title/price card.
+    return { state: "unknown", listingId: null, sellerMatchesOwner: null, payloadHash: null };
   }
 
   async verifyRecreate(
@@ -403,10 +552,17 @@ export class FacebookDriver implements MarketplaceDriver {
     newListingId: string,
   ): Promise<VerifyResult> {
     await this.requireConnected(userId);
-    const cards = await this.sellingCards(userId);
+    const snapshot = await this.browser.collectSnapshotAt(userId, SELLING_LIST_URL);
+    const complete = Boolean(snapshot && isCompleteSellingList(snapshot));
+    const cards = complete ? parseSellingCards(snapshot!.sellingCards!, this.now()) : [];
+    const newCard = cards.find((card) => card.id === newListingId);
     return {
-      oldGone: !cards.some((card) => card.id === oldListingId),
-      newListed: cards.some((card) => card.id === newListingId),
+      oldGone: complete && !cards.some((card) => card.id === oldListingId),
+      newListed: Boolean(newCard),
+      complete,
+      newListingId: newCard?.id ?? null,
+      newSellerId: null,
+      newPayloadHash: null,
     };
   }
 
@@ -415,6 +571,12 @@ export class FacebookDriver implements MarketplaceDriver {
     listingId: string,
     options: { dryRun: boolean },
   ): Promise<DeleteOutcome> {
+    if (options.dryRun) {
+      return { kind: "dry_run" };
+    }
+    if (!LIVE_MUTATIONS_ENABLED) {
+      return { kind: "not_deleted", reason: "Live Facebook listing deletion is disabled by the server release gate." };
+    }
     await this.requireConnected(userId);
     const opened = await this.browser.collectSnapshotAt(userId, listingPageUrl(listingId));
     if (!opened) {
@@ -430,12 +592,6 @@ export class FacebookDriver implements MarketplaceDriver {
     }
     await this.pace();
 
-    if (options.dryRun) {
-      // The confirm dialog is open (or the flow is at its last step);
-      // stop here. Nothing is deleted in a dry run, ever.
-      return { kind: "dry_run" };
-    }
-
     const confirmed = await this.browser.runScript(userId, DELETE_CONFIRM_SCRIPT);
     if (confirmed !== true) {
       return { kind: "not_deleted", reason: "The delete confirmation dialog could not be completed." };
@@ -443,6 +599,9 @@ export class FacebookDriver implements MarketplaceDriver {
     await this.pace();
 
     const stillListed = await this.listingStillListed(userId, listingId);
+    if (stillListed === "unknown") {
+      return { kind: "unknown", reason: "The selling list could not confirm whether the original listing remains present." };
+    }
     if (stillListed) {
       return { kind: "not_deleted", reason: "The listing still appears in the selling list after delete." };
     }

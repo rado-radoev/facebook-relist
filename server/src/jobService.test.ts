@@ -1,4 +1,4 @@
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -9,6 +9,8 @@ import type {
   MarketplaceDriver,
   VerifyResult,
 } from "./facebookDriver.js";
+import { FacebookDriver } from "./facebookDriver.js";
+import type { BrowserManager } from "./browserManager.js";
 import type { ListingAvailability, ListingFingerprint } from "./jobLogic.js";
 import {
   ActiveJobExistsError,
@@ -38,17 +40,38 @@ class FakeDriver implements MarketplaceDriver {
   readonly calls: DriverCalls = { create: [], delete: [], check: [], duplicateChecks: 0 };
   /** Availability results, consumed in order; the last one repeats. */
   availabilityQueue: ListingAvailability[] = ["available"];
+  duplicateLookupUnknown = false;
+  originalLookupUnknown = false;
   duplicateId: string | null = null;
   createOutcome: CreateOutcome = { kind: "created", listingId: NEW_ID, url: `https://www.facebook.com/marketplace/item/${NEW_ID}` };
   deleteOutcome: DeleteOutcome = { kind: "deleted" };
-  oldStillListed = true;
-  verifyResult: VerifyResult = { oldGone: true, newListed: true };
+  oldStillListed: boolean | "unknown" = true;
+  verifyResult: VerifyResult = {
+    oldGone: true,
+    newListed: true,
+    complete: true,
+    newListingId: NEW_ID,
+    newSellerId: "owner-1",
+    newPayloadHash: "approved-hash",
+  };
+  originalCheck: "unchanged" | "changed" | "unknown" = "unchanged";
+  replacementCheck: {
+    state: "verified" | "unknown";
+    listingId: string | null;
+    sellerMatchesOwner: boolean | null;
+    payloadHash: string | null;
+  } = { state: "verified", listingId: NEW_ID, sellerMatchesOwner: true, payloadHash: "approved-hash" };
+  verifiedPayloadHash = "";
+  onDelete: (() => Promise<void>) | undefined;
 
   async findPossibleDuplicate(
     _userId: string,
     _fp: ListingFingerprint,
-  ): Promise<SyncedListing | null> {
+  ): Promise<SyncedListing | null | { kind: "unknown"; reason: string }> {
     this.calls.duplicateChecks += 1;
+    if (this.duplicateLookupUnknown) {
+      return { kind: "unknown", reason: "Incomplete synthetic selling-list read." };
+    }
     if (!this.duplicateId) {
       return null;
     }
@@ -87,12 +110,32 @@ class FakeDriver implements MarketplaceDriver {
     return this.availabilityQueue[0];
   }
 
-  async listingStillListed(): Promise<boolean> {
-    return this.oldStillListed;
+  async listingStillListed(): Promise<boolean | "unknown"> {
+    return this.originalLookupUnknown ? "unknown" : this.oldStillListed;
+  }
+
+  async verifyNewListing(
+    _userId: string,
+    listingId: string,
+    _url: string,
+    approvedPayloadHash: string,
+  ): Promise<typeof this.replacementCheck> {
+    this.verifiedPayloadHash = approvedPayloadHash;
+    return {
+      ...this.replacementCheck,
+      listingId: this.replacementCheck.listingId ?? listingId,
+      payloadHash: this.replacementCheck.payloadHash === "approved-hash"
+        ? approvedPayloadHash
+        : this.replacementCheck.payloadHash,
+    };
+  }
+
+  async checkOriginalUnchanged(): Promise<"unchanged" | "changed" | "unknown"> {
+    return this.originalCheck;
   }
 
   async verifyRecreate(): Promise<VerifyResult> {
-    return this.verifyResult;
+    return { ...this.verifyResult, newPayloadHash: this.verifyResult.newPayloadHash === "approved-hash" ? this.verifiedPayloadHash : this.verifyResult.newPayloadHash };
   }
 
   async deleteListing(
@@ -100,6 +143,7 @@ class FakeDriver implements MarketplaceDriver {
     listingId: string,
     options: { dryRun: boolean },
   ): Promise<DeleteOutcome> {
+    await this.onDelete?.();
     this.calls.delete.push({ listingId, dryRun: options.dryRun });
     if (options.dryRun) {
       return { kind: "dry_run" };
@@ -126,11 +170,16 @@ function completeClone(): StoredClone {
         { type: "Local pickup only", shipping: false, meetup: { public: false, doorPickup: false, doorDropoff: false } },
         "edit_form",
       ),
-      photos: {
+      photos: Object.assign({
         urls: ["https://cdn.example/a/photo-1.jpg"],
         files: ["photo-1.jpg"],
         downloaded: 1,
-      },
+      }, {
+        complete: true,
+        expectedCount: 1,
+        identities: ["media-1"],
+        reasons: [null],
+      }),
       video: { present: false, state: "none", file: null, reason: null },
       step2Blocked: false,
     },
@@ -157,6 +206,9 @@ function makeService(dryRun = false): JobService {
 }
 
 async function seedUser(): Promise<void> {
+  const mediaDir = path.join(dataDir, "archive", USER, OLD_ID);
+  await mkdir(mediaDir, { recursive: true });
+  await writeFile(path.join(mediaDir, "photo-1.jpg"), "approved generated image bytes");
   await store.setListings(USER, [
     {
       id: OLD_ID,
@@ -204,10 +256,11 @@ describe("job creation guards", () => {
     });
   });
 
-  it("refuses a second active job for the same user (per-user lock)", async () => {
+  it("returns the existing job for an idempotent same-listing create", async () => {
     const service = makeService();
-    await service.createJob(USER, OLD_ID);
-    await expect(service.createJob(USER, OLD_ID)).rejects.toBeInstanceOf(ActiveJobExistsError);
+    const first = await service.createJob(USER, OLD_ID);
+    const second = await service.createJob(USER, OLD_ID);
+    expect(second.id).toBe(first.id);
   });
 
   it("refuses a job for a listing that is not in the user's synced list", async () => {
@@ -215,11 +268,149 @@ describe("job creation guards", () => {
     await expect(service.createJob(USER, "999")).rejects.toThrow(/not in this account's synced/);
   });
 
-  it("keeps jobs isolated per user", async () => {
+  it("atomically coalesces concurrent creates for the same user and original listing", async () => {
+    const service = makeService();
+    const jobs = await Promise.all([
+      service.createJob(USER, OLD_ID),
+      service.createJob(USER, OLD_ID),
+    ]);
+    expect(jobs[0].id).toBe(jobs[1].id);
+    expect(store.listJobs(USER)).toHaveLength(1);
+  });
+
+  it("uses the shared user-operation coordinator to serialize creates across service instances", async () => {
+    const tails = new Map<string, Promise<void>>();
+    const withUserOperation = async <T>(userId: string, operation: () => Promise<T>): Promise<T> => {
+      const previous = tails.get(userId) ?? Promise.resolve();
+      let release!: () => void;
+      const current = new Promise<void>((resolve) => { release = resolve; });
+      tails.set(userId, previous.then(() => current));
+      await previous;
+      try {
+        return await operation();
+      } finally {
+        release();
+      }
+    };
+    const options = {
+      dryRun: false,
+      pollIntervalMs: POLL_MS,
+      stuckAfterMs: STUCK_MS,
+      now: () => clock,
+      random: () => 0.5,
+      withUserOperation,
+    };
+    const firstService = new JobService(store, driver, dataDir, options);
+    const secondService = new JobService(store, driver, dataDir, options);
+    const [first, second] = await Promise.all([
+      firstService.createJob(USER, OLD_ID),
+      secondService.createJob(USER, OLD_ID),
+    ]);
+    expect(first.id).toBe(second.id);
+    expect(store.listJobs(USER)).toHaveLength(1);
+  });
+
+  it("does not adopt a weak duplicate after an ambiguous create outcome", async () => {
+    driver.createOutcome = { kind: "unknown", reason: "The submit result was not readable." };
     const service = makeService();
     const job = await service.createJob(USER, OLD_ID);
-    expect(service.getJob("someone-else", job.id)).toBeUndefined();
-    expect(service.listJobs("someone-else")).toEqual([]);
+    await service.processJob(USER, job.id);
+    expect(service.getJob(USER, job.id)?.status).toBe("needs_input");
+    driver.duplicateId = NEW_ID;
+    await service.processJob(USER, job.id);
+    expect(driver.calls.create).toHaveLength(1);
+    expect(driver.calls.duplicateChecks).toBe(1);
+  });
+
+  it("does not create when duplicate-check reads are incomplete", async () => {
+    driver.duplicateLookupUnknown = true;
+    const service = makeService();
+    const job = await service.createJob(USER, OLD_ID);
+    const after = await service.processJob(USER, job.id);
+    expect(after?.status).toBe("needs_input");
+    expect(after?.newListingId).toBeNull();
+    expect(driver.calls.create).toHaveLength(0);
+  });
+
+  it("requires reconciliation when a created outcome URL identifies another listing", async () => {
+    driver.createOutcome = {
+      kind: "created",
+      listingId: NEW_ID,
+      url: `https://www.facebook.com/marketplace/item/${OLD_ID}`,
+    };
+    const service = makeService();
+    const job = await service.createJob(USER, OLD_ID);
+    const after = await service.processJob(USER, job.id);
+    expect(after?.status).toBe("needs_input");
+    expect(after?.newListingId).toBeNull();
+    expect(driver.calls.create).toHaveLength(1);
+  });
+
+  it("stops before create when approved archive media changes", async () => {
+    const service = makeService();
+    const job = await service.createJob(USER, OLD_ID);
+    const mediaPath = path.join(dataDir, "archive", USER, OLD_ID, "photo-1.jpg");
+    await mkdir(path.dirname(mediaPath), { recursive: true });
+    await writeFile(mediaPath, "approved generated image bytes");
+    await writeFile(mediaPath, "changed bytes");
+    const after = await service.processJob(USER, job.id);
+    expect(after?.status).toBe("needs_input");
+    expect(driver.calls.create).toHaveLength(0);
+  });
+
+  it("persists delete intent before calling the driver", async () => {
+    let intentPersisted = false;
+    driver.onDelete = async () => {
+      const job = store.listJobs(USER)[0];
+      intentPersisted = job.status === "delete_intent" && job.audit.some((event) => event.action === "delete_intent");
+    };
+    const service = makeService();
+    const job = await service.createJob(USER, OLD_ID);
+    await service.processJob(USER, job.id);
+    advanceClock(POLL_MS);
+    await service.processJob(USER, job.id);
+    expect(intentPersisted).toBe(true);
+  });
+
+  it("turns an ambiguous delete exception into durable reconciliation without retry", async () => {
+    let attempts = 0;
+    driver.onDelete = async () => {
+      attempts += 1;
+      throw new Error("browser disconnected after delete click");
+    };
+    const service = makeService();
+    const job = await service.createJob(USER, OLD_ID);
+    await service.processJob(USER, job.id);
+    advanceClock(POLL_MS);
+    const after = await service.processJob(USER, job.id);
+    expect(after?.status).toBe("needs_input");
+    expect(after?.audit.some((event) => event.action === "delete_reconciliation_required")).toBe(true);
+    expect(attempts).toBe(1);
+    await service.processJob(USER, job.id);
+    expect(attempts).toBe(1);
+  });
+
+  it("requires reconciliation when approved media changed before create", async () => {
+    const service = makeService();
+    const archiveDir = path.join(dataDir, "archive", USER, OLD_ID);
+    await mkdir(archiveDir, { recursive: true });
+    await writeFile(path.join(archiveDir, "photo-1.jpg"), "original-bytes");
+    const job = await service.createJob(USER, OLD_ID);
+    await writeFile(path.join(archiveDir, "photo-1.jpg"), "tampered");
+    await service.processJob(USER, job.id);
+    expect(service.getJob(USER, job.id)?.status).toBe("needs_input");
+    expect(driver.calls.create).toHaveLength(0);
+  });
+
+  it("marks alerts as durable actionable needs-input state", async () => {
+    driver.createOutcome = { kind: "unknown", reason: "Submit response was lost." };
+    const service = makeService();
+    const job = await service.createJob(USER, OLD_ID);
+    await service.processJob(USER, job.id);
+    const reopened = new Store(dataDir);
+    await reopened.load();
+    expect(reopened.getJob(USER, job.id)?.status).toBe("needs_input");
+    expect(reopened.getJob(USER, job.id)?.alert).toMatch(/reconcil/i);
   });
 });
 
@@ -306,6 +497,23 @@ describe("watch step", () => {
     expect(after?.error).toContain("has NOT been deleted");
     expect(driver.calls.delete).toHaveLength(0);
   });
+
+  it("marks an over-deadline review stuck when the availability read errors", async () => {
+    driver.availabilityQueue = ["in_review"];
+    const service = makeService();
+    const job = await service.createJob(USER, OLD_ID);
+    await service.processJob(USER, job.id);
+    clock = new Date(Date.parse(job.inReviewSince!) + STUCK_MS + 1);
+    driver.checkListing = async () => {
+      throw new Error("synthetic read failure");
+    };
+
+    const after = await service.processJob(USER, job.id);
+
+    expect(after?.status).toBe("stuck");
+    expect(after?.alert).toMatch(/over 48 hours/i);
+    expect(driver.calls.delete).toHaveLength(0);
+  });
 });
 
 describe("delete guards", () => {
@@ -318,17 +526,75 @@ describe("delete guards", () => {
     return watched?.id ?? job.id;
   }
 
-  it("refuses to delete when the fresh delete-time check says in_review again", async () => {
-    // Poll says available; the delete-time re-check says in_review.
-    driver.availabilityQueue = ["available", "in_review"];
+  it("requires reconciliation if the original listing changes before delete", async () => {
+    driver.availabilityQueue = ["available", "available"];
+    const service = makeService();
+    const job = await service.createJob(USER, OLD_ID);
+    await service.processJob(USER, job.id);
+    advanceClock(POLL_MS);
+    await store.setListings(USER, [{
+      ...store.getListings(USER)[0],
+      title: "Widget edited elsewhere",
+    }]);
+    driver.originalCheck = "changed";
+    const after = await service.processJob(USER, job.id);
+    expect(after?.status).toBe("needs_input");
+    expect(driver.calls.delete).toHaveLength(0);
+  });
+
+  it("requires reconciliation when original listing details are incomplete", async () => {
+    driver.availabilityQueue = ["available", "available"];
+    driver.originalLookupUnknown = true;
     const service = makeService();
     const job = await service.createJob(USER, OLD_ID);
     await service.processJob(USER, job.id);
     advanceClock(POLL_MS);
     const after = await service.processJob(USER, job.id);
-    expect(after?.status).toBe("in_review");
+    expect(after?.status).toBe("needs_input");
     expect(driver.calls.delete).toHaveLength(0);
-    expect((after?.audit ?? []).some((event) => event.action === "delete_deferred")).toBe(true);
+  });
+
+  it("stops for reconciliation when the fresh delete-time availability is unknown", async () => {
+    driver.availabilityQueue = ["available", "unknown"];
+    const service = makeService();
+    const job = await service.createJob(USER, OLD_ID);
+    await service.processJob(USER, job.id);
+    advanceClock(POLL_MS);
+    const after = await service.processJob(USER, job.id);
+    expect(after?.status).toBe("needs_input");
+    expect(after?.alert).toMatch(/could not be confirmed/i);
+    expect(driver.calls.delete).toHaveLength(0);
+  });
+
+  it("does not delete unless exact replacement, seller, and approved payload verify", async () => {
+    driver.availabilityQueue = ["available", "available"];
+    driver.replacementCheck = {
+      state: "verified",
+      listingId: "333",
+      sellerMatchesOwner: true,
+      payloadHash: "different-payload",
+    };
+    const service = makeService();
+    const job = await service.createJob(USER, OLD_ID);
+    await service.processJob(USER, job.id);
+    advanceClock(POLL_MS);
+    const after = await service.processJob(USER, job.id);
+    expect(after?.status).toBe("needs_input");
+    expect(after?.alert).toMatch(/manual reconciliation/i);
+    expect(driver.calls.delete).toHaveLength(0);
+  });
+
+  it("requires reconciliation when old-listing presence cannot be read", async () => {
+    driver.availabilityQueue = ["available", "available"];
+    driver.oldStillListed = "unknown";
+    const service = makeService();
+    const job = await service.createJob(USER, OLD_ID);
+    await service.processJob(USER, job.id);
+    advanceClock(POLL_MS);
+    const after = await service.processJob(USER, job.id);
+    expect(after?.status).toBe("needs_input");
+    expect(after?.alert).toMatch(/original listing presence could not be confirmed/i);
+    expect(driver.calls.delete).toHaveLength(0);
   });
 
   it("refuses to delete when the new listing id matches the old listing id", async () => {
@@ -343,8 +609,8 @@ describe("delete guards", () => {
     await service.processJob(USER, job.id);
     advanceClock(POLL_MS);
     const after = await service.processJob(USER, job.id);
-    expect(after?.status).toBe("failed");
-    expect(after?.error).toContain("Delete refused");
+    expect(after?.status).toBe("needs_input");
+    expect(after?.alert).toMatch(/did not identify a distinct listing/i);
     expect(driver.calls.delete).toHaveLength(0);
   });
 
@@ -359,7 +625,14 @@ describe("delete guards", () => {
   });
 
   it("fails honestly when post-delete verification does not confirm", async () => {
-    driver.verifyResult = { oldGone: false, newListed: true };
+    driver.verifyResult = {
+      oldGone: false,
+      newListed: true,
+      complete: true,
+      newListingId: NEW_ID,
+      newSellerId: "owner-1",
+      newPayloadHash: "approved-hash",
+    };
     const service = makeService();
     const id = await jobInAvailableState(service);
     const job = service.getJob(USER, id);
@@ -370,18 +643,16 @@ describe("delete guards", () => {
 });
 
 describe("duplicate guard", () => {
-  it("adopts an already-created copy instead of creating a duplicate", async () => {
+  it("requires reconciliation for a possible duplicate rather than adopting it", async () => {
     driver.duplicateId = NEW_ID;
     driver.availabilityQueue = ["available", "available"];
     const service = makeService();
     const job = await service.createJob(USER, OLD_ID);
     const after = await service.processJob(USER, job.id);
     expect(driver.calls.create).toHaveLength(0);
-    expect(after?.newListingId).toBe(NEW_ID);
-    expect((after?.audit ?? []).some((event) => event.action === "duplicate_adopted")).toBe(true);
-    advanceClock(POLL_MS);
-    const done = await service.processJob(USER, job.id);
-    expect(done?.status).toBe("done");
+    expect(after?.status).toBe("needs_input");
+    expect(after?.newListingId).toBeNull();
+    expect((after?.audit ?? []).some((event) => event.action === "duplicate_reconciliation_required")).toBe(true);
   });
 });
 
@@ -410,22 +681,65 @@ describe("resume after restart", () => {
     expect(service2.listHistory(USER)).toHaveLength(1);
   });
 
-  it("resumes a job stuck mid-create by re-running the duplicate guard first", async () => {
+  it("does not duplicate durable history when a completion write is replayed", async () => {
     const service = makeService();
     const job = await service.createJob(USER, OLD_ID);
-    // Force the persisted state a crash mid-create would leave behind.
+    job.status = "deleting";
+    job.newListingId = NEW_ID;
+    job.newListingUrl = `https://www.facebook.com/marketplace/item/${NEW_ID}`;
+    await store.updateJob(job);
+    await store.addHistory(USER, {
+      id: "history-existing",
+      jobId: job.id,
+      title: job.listingTitle,
+      oldListingId: OLD_ID,
+      oldListingUrl: job.oldListingUrl,
+      newListingId: NEW_ID,
+      newListingUrl: job.newListingUrl,
+      completedAt: clock.toISOString(),
+      suppliedFields: job.suppliedFields,
+    });
+    await service.processJob(USER, job.id);
+    expect(service.listHistory(USER).filter((entry) => entry.jobId === job.id)).toHaveLength(1);
+  });
+
+  it("resumes a job interrupted in creating as reconciliation, never retries or adopts", async () => {
+    const service = makeService();
+    const job = await service.createJob(USER, OLD_ID);
     const crashed = service.getJob(USER, job.id);
     crashed!.status = "creating";
     await store.updateJob(crashed!);
-
-    driver.duplicateId = NEW_ID; // the crashed attempt had actually posted it
-    driver.availabilityQueue = ["available", "available"];
+    driver.duplicateId = NEW_ID;
     const after = await service.processJob(USER, job.id);
+    expect(after?.status).toBe("needs_input");
+    expect(after?.newListingId).toBeNull();
     expect(driver.calls.create).toHaveLength(0);
-    expect(after?.newListingId).toBe(NEW_ID);
-    advanceClock(POLL_MS);
-    const done = await service.processJob(USER, job.id);
-    expect(done?.status).toBe("done");
+    expect(driver.calls.duplicateChecks).toBe(0);
+  });
+
+  it("does not duplicate a history row when restart replays the finish step", async () => {
+    const service = makeService();
+    const job = await service.createJob(USER, OLD_ID);
+    await service.processJob(USER, job.id);
+    const persisted = service.getJob(USER, job.id)!;
+    persisted.status = "deleting";
+    persisted.historyRecorded = false;
+    driver.verifiedPayloadHash = persisted.approvedPayloadHash;
+    await store.updateJob(persisted);
+    await store.addHistory(USER, {
+      id: "history-before-crash",
+      jobId: job.id,
+      title: persisted.listingTitle,
+      oldListingId: persisted.listingId,
+      oldListingUrl: persisted.oldListingUrl,
+      newListingId: persisted.newListingId!,
+      newListingUrl: persisted.newListingUrl!,
+      completedAt: clock.toISOString(),
+      suppliedFields: persisted.suppliedFields,
+    });
+    const resumed = makeService();
+    await resumed.processJob(USER, job.id);
+    expect(resumed.listHistory(USER).filter((entry) => entry.jobId === job.id)).toHaveLength(1);
   });
 });
 
@@ -448,5 +762,112 @@ describe("dry-run jobs", () => {
     expect(actions).toContain("watch_simulated");
     expect(actions).toContain("delete_dry_run");
     expect(actions).toContain("verify_simulated");
+  });
+
+  it("describes dry-run create as skipped rather than claiming the Facebook form was filled", async () => {
+    const service = makeService(true);
+    const job = await service.createJob(USER, OLD_ID);
+    const completed = await service.processJob(USER, job.id);
+    const createAudit = completed?.audit.find((event) => event.action === "create_dry_run");
+    expect(createAudit?.detail).toMatch(/skipped.*browser create flow/i);
+    expect(createAudit?.detail).not.toMatch(/form was filled/i);
+  });
+});
+
+describe("production Facebook driver mutation gate", () => {
+  it("does not trust non-empty selling cards without positive surface and completion evidence", async () => {
+    const browser = {
+      ensureSession: async () => undefined,
+      refreshStatus: async () => "connected",
+      collectSnapshotAt: async () => ({
+        url: "https://www.facebook.com/marketplace/you/selling",
+        text: "",
+        images: [],
+        videos: [],
+        sellingCards: [{
+          href: "https://www.facebook.com/marketplace/item/222",
+          title: "Widget",
+          priceText: "$30",
+          statusText: "Active",
+          imageUrl: "https://cdn.example/a/photo-1.jpg",
+        }],
+      }),
+    } as unknown as BrowserManager;
+    const driver = new FacebookDriver(browser);
+    const result = await driver.findPossibleDuplicate(USER, {
+      listingId: OLD_ID,
+      title: "widget",
+      price: "30",
+      photoKey: "photo-1.jpg",
+    });
+    expect(result).toMatchObject({ kind: "unknown" });
+  });
+
+  it("does not treat an incomplete selling-list read as an empty duplicate set", async () => {
+    const browser = {
+      ensureSession: async () => undefined,
+      refreshStatus: async () => "connected",
+      collectSnapshotAt: async () => ({
+        url: "https://www.facebook.com/marketplace/you/selling",
+        text: "",
+        images: [],
+        videos: [],
+        sellingCards: [],
+      }),
+    } as unknown as BrowserManager;
+    const driver = new FacebookDriver(browser);
+    const result = await driver.findPossibleDuplicate(USER, {
+      listingId: OLD_ID,
+      title: "widget",
+      price: "30",
+      photoKey: "photo-1.jpg",
+    });
+    expect(result).toMatchObject({ kind: "unknown" });
+  });
+
+  it("refuses a requested live create before touching the browser", async () => {
+    let touched = false;
+    const browser = {
+      ensureSession: async () => { touched = true; },
+      refreshStatus: async () => { touched = true; return "connected"; },
+      collectSnapshotAt: async () => { touched = true; return null; },
+    } as unknown as BrowserManager;
+    const driver = new FacebookDriver(browser);
+    const outcome = await driver.createListing(
+      USER,
+      {
+        title: "Widget",
+        price: "$30",
+        description: "A fine widget.",
+        category: "Toys & Games",
+        condition: "New",
+        attributes: {},
+        location: "San Diego, CA",
+        delivery: { type: "Local pickup only", shipping: false, meetup: { public: false, doorPickup: false, doorDropoff: false } },
+        photoFiles: ["photo-1.jpg"],
+        photoUrls: ["https://cdn.example/a/photo-1.jpg"],
+        videoFile: null,
+      },
+      [],
+      null,
+      { dryRun: false },
+    );
+    expect(outcome.kind).toBe("blocked");
+    expect(touched).toBe(false);
+  });
+
+  it("never opens a destructive delete path, including in dry run", async () => {
+    let touched = false;
+    const browser = {
+      ensureSession: async () => { touched = true; },
+      refreshStatus: async () => { touched = true; return "connected"; },
+      collectSnapshotAt: async () => { touched = true; return null; },
+    } as unknown as BrowserManager;
+    const driver = new FacebookDriver(browser);
+    const dryRun = await driver.deleteListing(USER, OLD_ID, { dryRun: true });
+    const live = await driver.deleteListing(USER, OLD_ID, { dryRun: false });
+    expect(dryRun.kind).toBe("dry_run");
+    expect(live.kind).toBe("not_deleted");
+    expect(touched).toBe(false);
   });
 });

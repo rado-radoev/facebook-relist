@@ -39,11 +39,14 @@ export function registerJobRoutes(
         await reply.code(409).send({ error: "Connect Facebook before recreating a listing" });
         return;
       }
+      const prior = jobs.listJobs(user.id).find((entry) => entry.listingId === id);
       try {
         const job = await jobs.createJob(user.id, id);
         // Kick the runner in the background; the client polls the job.
-        void jobs.processJob(user.id, job.id);
-        await reply.code(201).send({ job: toPublicJob(job) });
+        if (!prior) {
+          void jobs.processJob(user.id, job.id);
+        }
+        await reply.code(prior ? 200 : 201).send({ job: toPublicJob(job) });
       } catch (error) {
         if (error instanceof ListingNotSyncedError) {
           await reply.code(404).send({ error: "That listing is not in your synced listings" });
