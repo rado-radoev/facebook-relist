@@ -348,9 +348,12 @@ docker compose up -d --build
 ```
 
 Then open `http://<docker-host-LAN-IP>:5173` on the phone and sign in.
-The app calls the backend on the same host at port 8787, which compose
-publishes alongside 5173 — both ports must stay reachable on the home
-network.
+The app calls the backend at the same origin it was loaded from, and
+the web image proxies those `/api` calls (including the live-view
+WebSocket) to the backend container internally — so the phone only
+needs port 5173. Compose also publishes the backend's 8787 on the
+host, which is handy for health checks
+(`http://localhost:8787/api/health`) but not needed by the app.
 
 **Data:** everything that matters — accounts, Facebook browser
 profiles, downloaded photos — lives in the named Docker volume
@@ -373,6 +376,26 @@ to **host** in the hypervisor restores the primary decoder.
 public URL, or otherwise expose them beyond the home network — the app
 has no gate beyond its own sign-in, and whoever can reach it can drive
 a signed-in Facebook session.
+
+### Behind Nginx Proxy Manager (HTTPS)
+
+Put a single NPM proxy host in front of the **web** service
+(`<docker-host>:5173`) and turn NPM's **Websockets Support** ON. No
+NPM custom location is needed: the web image already proxies `/api`
+(HTTP and the live-view WebSocket) to the backend internally, so NPM
+only ever talks to the web container.
+
+For that route, the backend's `.env` values must match the HTTPS
+origin exactly:
+
+```sh
+CORS_ORIGIN=https://fbrelist.superlan.duckdns.org   # your subdomain, exactly as opened in the browser
+COOKIE_SECURE=1
+```
+
+With `COOKIE_SECURE=1` the session cookie is only sent over HTTPS:
+the plain-HTTP LAN address (`http://<docker-host>:5173`) will still
+load, but it will not hold a session — always use the HTTPS address.
 
 ## Household accounts — one signed-in person per device
 
