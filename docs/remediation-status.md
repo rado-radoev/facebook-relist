@@ -51,3 +51,53 @@ Status meanings: RESOLVED means implemented and evidenced in the integrated code
 - No live selector, upload, category, shipping, video, seller identity, exact replacement fidelity, gallery completeness or deletion behavior is proven. Live automatic photo recovery is not replaced by manual upload; both require separate evidence.
 - The original owner must resolve the absolute password non-receipt requirement. This remote-view architecture is a credential relay through Relist memory; user consent is not technical non-receipt. No silent waiver is made.
 - Integrated frontend media upload/add/replace/reorder, explicit empty/not-applicable and structured delivery/location/attribute edits, save/revision acknowledgment, full shared operation coordinator, captured-native-DOM evidence, broad blocked-network browser QA, CI workflow, final dependency audit, full docs cleanup and independent exact-SHA Luna review remain outstanding.
+
+## Addendum — owner-directed reversals (2026-11-09, branch `fix/restore-owner-switches`)
+
+After reviewing this merge, the owner kept the hardening overall but
+directed four specific behaviors restored to their pre-merge form
+(commit `797b5b4`), because they encode her own rulings for a home-LAN
+app rather than oversights:
+
+1. **Default bind + network hosts.** The loopback-only default bind
+   (`127.0.0.1`) and the startup gates for non-loopback hosts
+   (mandatory `COOKIE_SECURE=1`, https `CORS_ORIGIN`, TLS files) are
+   reversed: the default bind is dual-stack `::` again and a LAN /
+   wildcard `HOST` boots plainly. TLS remains supported and optional
+   when `TLS_CERT_FILE` + `TLS_KEY_FILE` are set (the pair-must-match
+   check stays). Why: the owner's PC browser resolves `localhost` to
+   IPv6 first (an IPv4-only bind was a proven sign-in failure there),
+   and the iPhone-on-Wi-Fi test requires binding a LAN address over
+   plain HTTP — the gates made that test impossible. This narrows the
+   H7 network-posture finding back to the owner's accepted home-LAN
+   posture; the finding's public-exposure concerns stand as documented
+   and are addressed by the "never expose beyond the home network"
+   rule in the README, not by boot gates.
+2. **Loopback origins on any port.** `isAllowedRequestOrigin` again
+   accepts the configured origin plus any loopback origin (localhost /
+   127.0.0.1 / ::1, any port), matching the CORS policy in
+   `corsOrigin.ts`; the same-port / configured-must-be-loopback
+   restrictions are removed. Why: the owner's ruling from the original
+   fix — local access must not depend on which loopback spelling or
+   port the browser happens to use. Non-loopback, non-configured
+   origins remain rejected, so the H2 origin-enforcement intent is
+   preserved for off-box origins.
+3. **The owner's dry-run switch.** `RELIST_DRY_RUN` is again the
+   real-writes switch (`dryRun: env.RELIST_DRY_RUN !== "0"`, default
+   ON, captured per job at creation), and the driver-level
+   `LIVE_MUTATIONS_ENABLED` hard gate is removed — the per-job
+   `dryRun` flag is once more the only write gate. This supersedes the
+   "Release gates" bullet above ("Real Facebook create/delete remain
+   hard-disabled… `RELIST_DRY_RUN=0` … cannot waive the gate"): that
+   is no longer true. Why: the switch is the owner's — dry-run stays
+   the default, and `=0` is reserved for a supervised first real
+   recreate with the owner present. All other job safeguards (missing-
+   field refusal, duplicate guard, delete-time re-verification,
+   stuck-after-48h) are unchanged.
+4. **Sign-out UI.** The "Sign out of Relist" button added to every
+   screen is removed again, per the owner's standing ruling that the
+   app has no sign-out UI. The backend logout endpoint and its
+   session-revocation behavior (H2) are unchanged and still tested at
+   the API level.
+
+Everything else in the hardening merge stands as documented above.

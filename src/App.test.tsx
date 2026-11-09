@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import App from "./App";
 
@@ -21,30 +21,28 @@ afterEach(() => {
 });
 
 describe("App session controls", () => {
-  it("lets the signed-in user sign out without a settings screen", async () => {
+  it("shows no sign-out control to the signed-in user (owner ruling)", async () => {
     api.fetchMe.mockResolvedValue({ id: "user-1", name: "Test Person", email: "test@example.invalid" });
     api.fetchFacebookStatus.mockResolvedValue("not_connected");
     api.fetchListings.mockResolvedValue({ listings: [], syncedAt: null });
-    api.logout.mockResolvedValue(undefined);
 
     render(<App />);
 
-    fireEvent.click(await screen.findByRole("button", { name: "Sign out of Relist" }));
-    await waitFor(() => expect(api.logout).toHaveBeenCalledOnce());
-    expect(await screen.findByRole("heading", { name: "Sign in to Relist" })).toBeTruthy();
+    // The signed-in shell renders (tab bar is only shown when signed in)…
+    expect(await screen.findByRole("button", { name: /listings/i })).toBeTruthy();
+    // …and there is no sign-out button anywhere on the screen. The
+    // backend logout endpoint still exists; the UI intentionally has
+    // no sign-out control.
+    expect(screen.queryByRole("button", { name: "Sign out of Relist" })).toBeNull();
+    expect(api.logout).not.toHaveBeenCalled();
   });
 
-  it("keeps the session visible and offers retry when sign out fails", async () => {
-    api.fetchMe.mockResolvedValue({ id: "user-1", name: "Test Person", email: "test@example.invalid" });
-    api.fetchFacebookStatus.mockResolvedValue("not_connected");
-    api.fetchListings.mockResolvedValue({ listings: [], syncedAt: null });
-    api.logout.mockRejectedValueOnce(new Error("synthetic revoke failure"));
+  it("shows the sign-in screen when there is no session", async () => {
+    api.fetchMe.mockRejectedValue(new Error("not signed in"));
 
     render(<App />);
 
-    fireEvent.click(await screen.findByRole("button", { name: "Sign out of Relist" }));
-    expect((await screen.findByRole("alert")).textContent).toMatch(/synthetic revoke failure/i);
-    expect(screen.queryByRole("heading", { name: "Sign in to Relist" })).toBeNull();
-    expect(screen.getByRole("button", { name: "Sign out of Relist" })).toBeTruthy();
+    expect(await screen.findByRole("heading", { name: "Sign in to Relist" })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Sign out of Relist" })).toBeNull();
   });
 });

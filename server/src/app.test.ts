@@ -130,16 +130,17 @@ describe("auth API", () => {
     expect(me.statusCode).toBe(200);
   });
 
-  it("blocks state changes from a different loopback port", async () => {
-    const cookie = await registerUser("Loopback CSRF Guard", "loopback-csrf@example.com");
+  it("allows state changes from a loopback origin on any port", async () => {
+    const cookie = await registerUser("Loopback Any Port", "loopback-any-port@example.com");
     const response = await parts.app.inject({
       method: "POST",
       url: "/api/auth/logout",
       headers: { cookie, origin: "http://localhost:9999" },
     });
-    expect(response.statusCode).toBe(403);
+    expect(response.statusCode).toBe(200);
+    // The logout really went through — the session is over.
     const me = await parts.app.inject({ method: "GET", url: "/api/auth/me", headers: { cookie } });
-    expect(me.statusCode).toBe(200);
+    expect(me.statusCode).toBe(401);
   });
 
   it("rejects state-changing requests without Origin when a session cookie is present", async () => {
@@ -253,19 +254,15 @@ describe("auth API", () => {
 });
 
 describe("websocket session boundary", () => {
-  it("rejects a connected socket when the Origin uses an unconfigured loopback port", async () => {
+  it("accepts a connected socket from a loopback Origin on any port", async () => {
     const cookie = await registerUser("Origin Guard", "origin-guard@example.com");
     const endpoint = websocketOrigin.replace(/^http:/, "ws:") + "/api/facebook/view";
-    const invalid = new WebSocket(endpoint, { headers: { cookie, origin: "http://localhost:9999" } });
-    const rejected = await new Promise<boolean>((resolve) => {
-      invalid.once("open", () => resolve(false));
-      invalid.once("unexpected-response", (_request, response) => {
-        response.resume();
-        resolve(true);
-      });
-      invalid.once("error", () => resolve(true));
+    const socket = new WebSocket(endpoint, { headers: { cookie, origin: "http://localhost:9999" } });
+    await new Promise<void>((resolve, reject) => {
+      socket.once("open", resolve);
+      socket.once("error", reject);
     });
-    expect(rejected).toBe(true);
+    socket.close();
   });
 
   it("closes an authorized WebSocket after logout", async () => {

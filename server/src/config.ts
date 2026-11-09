@@ -40,22 +40,36 @@ export function parseProxyEnv(raw: string | undefined): ProxyConfig | undefined 
 
 const LOCAL_ORIGIN_HOSTS = new Set(["localhost", "127.0.0.1", "::1"]);
 
+/**
+ * Request-origin policy for state-changing HTTP requests and the
+ * browser WebSocket (the @fastify/cors plugin uses the matching policy
+ * in corsOrigin.ts). The configured CORS_ORIGIN is always allowed. In
+ * addition, any origin whose host is a loopback name (localhost,
+ * 127.0.0.1, [::1]) is allowed on ANY port: a local run can be opened
+ * through several loopback spellings, and which one the browser uses
+ * depends on its resolver, so pinning local access to one exact origin
+ * string made sign-in fail with "could not reach the backend" on
+ * otherwise-correct setups. Loopback origins can only come from the
+ * same machine, so this does not widen access for anyone off the box.
+ * Every other non-configured origin is rejected.
+ */
 export function isAllowedRequestOrigin(origin: string, configuredOrigin: string): boolean {
+  if (origin === configuredOrigin) {
+    return true;
+  }
+  let url: URL;
   try {
-    const actual = new URL(origin);
-    const configured = new URL(configuredOrigin);
-    const isSerializedOrigin = (value: string, parsed: URL): boolean =>
-      parsed.origin === value && !parsed.username && !parsed.password &&
-      (parsed.pathname === "" || parsed.pathname === "/") && !parsed.search && !parsed.hash;
-    if (!isSerializedOrigin(origin, actual) || !isSerializedOrigin(configuredOrigin, configured)) return false;
-    if (origin === configuredOrigin) return true;
-    const actualHost = actual.hostname.replace(/^\[(.*)\]$/, "$1").toLowerCase();
-    const configuredHost = configured.hostname.replace(/^\[(.*)\]$/, "$1").toLowerCase();
-    return actual.protocol === configured.protocol && actual.port === configured.port &&
-      LOCAL_ORIGIN_HOSTS.has(actualHost) && LOCAL_ORIGIN_HOSTS.has(configuredHost);
+    url = new URL(origin);
   } catch {
     return false;
   }
+  if (url.protocol !== "http:" && url.protocol !== "https:") {
+    return false;
+  }
+  // WHATWG URL keeps the brackets on IPv6 hostnames ("[::1]"); strip
+  // them so the comparison matches both spellings.
+  const host = url.hostname.replace(/^\[(.*)\]$/, "$1").toLowerCase();
+  return LOCAL_ORIGIN_HOSTS.has(host);
 }
 
 export interface Config {
@@ -104,22 +118,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     ? rawDataDir
     : path.resolve(serverDir, "..", rawDataDir);
 
-  const rawHost = env.HOST ?? "127.0.0.1";
-  const normalizedHost = rawHost.replace(/^\[(.*)\]$/, "$1");
-  const explicitlyRemote = !["localhost", "127.0.0.1", "::1"].includes(normalizedHost);
-  const remote = explicitlyRemote;
-  const configuredSecureCookie = env.COOKIE_SECURE === "1";
-  if (remote && !configuredSecureCookie) {
-    throw new Error("COOKIE_SECURE=1 is required when HOST exposes Relist beyond loopback");
-  }
-  if (remote && !env.CORS_ORIGIN?.startsWith("https://")) {
-    throw new Error("CORS_ORIGIN must be an explicit https:// origin for network deployments");
-  }
   if (Boolean(env.TLS_CERT_FILE) !== Boolean(env.TLS_KEY_FILE)) {
     throw new Error("TLS_CERT_FILE and TLS_KEY_FILE must be configured together");
-  }
-  if (remote && (!env.TLS_CERT_FILE || !env.TLS_KEY_FILE)) {
-    throw new Error("TLS_CERT_FILE and TLS_KEY_FILE are required for network deployments");
   }
   if (env.BROWSER_IGNORE_CERT_ERRORS === "1") {
     throw new Error("BROWSER_IGNORE_CERT_ERRORS is prohibited; Facebook certificate validation must remain enabled");
@@ -127,18 +127,26 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
 
   return {
     port: Number(env.PORT ?? 8787),
-    // Bind to loopback by default. A non-loopback HOST requires explicit TLS posture.
-    host: rawHost,
+    // Dual-stack bind by default: "::" answers on both IPv6 (::1) and
+    // IPv4 (127.0.0.1) and on the machine's LAN addresses, so the phone
+    // on the home network can reach the backend. Some browsers resolve
+    // "localhost" to ::1 first, so an IPv4-only bind makes the backend
+    // unreachable depending on which loopback spelling the browser
+    // picks. HOST overrides; binding a LAN/wildcard host boots plainly
+    // (this is a home-LAN app — TLS below stays optional).
+    host: env.HOST ?? "::",
     dataDir,
     corsOrigin: env.CORS_ORIGIN ?? "http://localhost:5173",
-    cookieSecure: configuredSecureCookie,
+    cookieSecure: env.COOKIE_SECURE === "1",
+    // TLS is optional: served only when both files are configured.
     tls: env.TLS_CERT_FILE && env.TLS_KEY_FILE
       ? { certFile: path.resolve(env.TLS_CERT_FILE), keyFile: path.resolve(env.TLS_KEY_FILE) }
       : undefined,
     browserProxy: parseProxyEnv(env.BROWSER_PROXY),
     browserIgnoreCertErrors: false,
-    // Live create/delete stays closed pending an owner-approved release gate.
-    dryRun: true,
+    // Owner's safety switch: dry-run unless RELIST_DRY_RUN is exactly
+    // "0". Captured onto each job at creation (see jobService).
+    dryRun: env.RELIST_DRY_RUN !== "0",
     jobPollIntervalMs: parsePositiveMs(env.RELIST_POLL_INTERVAL_MS, 15 * 60 * 1000),
     jobStuckAfterMs: parsePositiveMs(env.RELIST_STUCK_AFTER_MS, 48 * 60 * 60 * 1000),
   };

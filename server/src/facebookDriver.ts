@@ -304,10 +304,6 @@ function isExpectedListingSurface(snapshot: PageSnapshot, listingId: string): bo
   );
 }
 
-// Intentionally not configurable through environment, request, or constructor.
-// Real Facebook writes remain closed until a separately reviewed release.
-const LIVE_MUTATIONS_ENABLED = false;
-
 // ---------------------------------------------------------------------------
 // Real driver
 
@@ -375,12 +371,6 @@ export class FacebookDriver implements MarketplaceDriver {
   ): Promise<CreateOutcome> {
     if (options.dryRun) {
       return { kind: "dry_run" };
-    }
-    if (!LIVE_MUTATIONS_ENABLED) {
-      return {
-        kind: "blocked",
-        reason: "Live Facebook listing creation is disabled by the server release gate.",
-      };
     }
     await this.requireConnected(userId);
     const start = await this.browser.collectSnapshotAt(userId, CREATE_LISTING_URL);
@@ -577,9 +567,6 @@ export class FacebookDriver implements MarketplaceDriver {
   ): Promise<DeleteOutcome> {
     if (options.dryRun) {
       return { kind: "dry_run" };
-    }
-    if (!LIVE_MUTATIONS_ENABLED) {
-      return { kind: "not_deleted", reason: "Live Facebook listing deletion is disabled by the server release gate." };
     }
     await this.requireConnected(userId);
     const opened = await this.browser.collectSnapshotAt(userId, listingPageUrl(listingId));

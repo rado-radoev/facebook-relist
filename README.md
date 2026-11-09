@@ -227,8 +227,12 @@ never just in the UI.
   interaction in dry-run mode. It does not fill a form or open a Delete
   menu. State-machine walkthroughs are tested with injected fake drivers;
   they are simulated and do not prove production Facebook behavior.
-- `RELIST_DRY_RUN=0` cannot enable writes. The production mutation release
-  gate is a separate hard-coded false gate.
+- `RELIST_DRY_RUN=0` = **live mode** — the owner's switch. Jobs created
+  while it is set are marked `dryRun: false`, and the driver performs
+  real creates and deletes for them. The setting is captured onto each
+  job at creation, so changing it later never flips a job that already
+  exists. Default stays ON (safe); `0` is for a supervised real
+  recreate, owner present.
 - Prove it any time with the fake-driver smoke check:
   `cd server && npx tsx scripts/dry-run-smoke.ts` (6 checks: job is
   dry-run by default, walks to done, the driver only ever receives
@@ -282,6 +286,24 @@ spelling your browser resolves `localhost` to.
 `{"ok":true}`. If it doesn't load, (re)start terminal 1 and leave it
 running; the frontend alone cannot sign anyone in.
 
+**Phone test on the home Wi-Fi:** the backend binds every interface by
+default (dual-stack `::`), so it also answers at the PC's LAN address.
+Start the frontend so the phone can reach it, and tell the backend the
+phone's page origin (a LAN origin is not loopback, so it must be the
+configured one):
+
+```sh
+# Backend (terminal 1) — use your PC's LAN IP
+CORS_ORIGIN=http://192.168.1.20:5173 npm run dev
+
+# Frontend (terminal 2)
+npm run dev -- --host
+```
+
+Then open `http://192.168.1.20:5173` (your PC's LAN IP) in the phone's
+browser and sign in there. The app talks to the backend on the same
+host the page was served from, so nothing else needs configuring.
+
 Backend config is via env (see `server/.env.example`): `PORT`, `HOST`,
 `DATA_DIR` (accounts + browser profiles; default `server/data/`),
 `CORS_ORIGIN`, `COOKIE_SECURE`, and two sandbox-only options
@@ -289,8 +311,11 @@ Backend config is via env (see `server/.env.example`): `PORT`, `HOST`,
 the home server.
 
 Tests: `npm ci && npm ci --prefix server`, then `npm run server:test`,
-`npm run server:typecheck`, and `npm run build` from the repo root. Keep
-development servers bound to loopback and do not expose Vite/Vitest.
+`npm run server:typecheck`, and `npm run build` from the repo root. The
+dev servers are reachable on the home LAN by design (that is how the
+phone test works) — do not expose them beyond the home network: no
+port forwarding, no public URL. Relist's own sign-in is the only gate
+in front of them.
 
 ## Household accounts — one signed-in person per device
 
