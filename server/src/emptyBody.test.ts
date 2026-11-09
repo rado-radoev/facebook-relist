@@ -78,7 +78,7 @@ async function bodylessPost(url: string) {
   return parts.app.inject({
     method: "POST",
     url,
-    headers: { cookie, "content-type": "application/json" },
+    headers: { cookie, origin: "http://localhost:5173", "content-type": "application/json" },
     payload: "",
   });
 }

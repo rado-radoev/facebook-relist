@@ -126,7 +126,7 @@ async function connect(cookie: string): Promise<void> {
   const res = await parts.app.inject({
     method: "POST",
     url: "/api/facebook/connect",
-    headers: { cookie },
+    headers: { cookie, origin: "http://localhost:5173" },
   });
   expect(res.statusCode).toBe(200);
 }
@@ -149,7 +149,7 @@ describe("listings sync + clone recovery API", () => {
     const sync = await parts.app.inject({
       method: "POST",
       url: "/api/listings/sync",
-      headers: { cookie: cookieC },
+      headers: { cookie: cookieC, origin: "http://localhost:5173" },
     });
     expect(sync.statusCode).toBe(409);
   });
@@ -163,14 +163,14 @@ describe("listings sync + clone recovery API", () => {
     const before = await parts.app.inject({
       method: "GET",
       url: "/api/listings",
-      headers: { cookie: cookieA },
+      headers: { cookie: cookieA, origin: "http://localhost:5173" },
     });
     expect(before.json().listings).toEqual([]);
 
     const sync = await parts.app.inject({
       method: "POST",
       url: "/api/listings/sync",
-      headers: { cookie: cookieA },
+      headers: { cookie: cookieA, origin: "http://localhost:5173" },
     });
     expect(sync.statusCode).toBe(200);
     const listings = sync.json().listings as Array<Record<string, unknown>>;
@@ -184,7 +184,7 @@ describe("listings sync + clone recovery API", () => {
     const res = await parts.app.inject({
       method: "POST",
       url: `/api/listings/${SWITCHES_ID}/clone/recover`,
-      headers: { cookie: cookieA },
+      headers: { cookie: cookieA, origin: "http://localhost:5173" },
     });
     expect(res.statusCode).toBe(200);
     const clone = res.json().clone as Record<string, any>;
@@ -207,7 +207,7 @@ describe("listings sync + clone recovery API", () => {
     const photoRes = await parts.app.inject({
       method: "GET",
       url: `/api/listings/${SWITCHES_ID}/photos/0`,
-      headers: { cookie: cookieA },
+      headers: { cookie: cookieA, origin: "http://localhost:5173" },
     });
     expect(photoRes.statusCode).toBe(200);
     expect(photoRes.headers["content-type"]).toContain("image/jpeg");
@@ -217,7 +217,7 @@ describe("listings sync + clone recovery API", () => {
     const res = await parts.app.inject({
       method: "POST",
       url: `/api/listings/${HOT_WHEELS_ID}/clone/recover`,
-      headers: { cookie: cookieA },
+      headers: { cookie: cookieA, origin: "http://localhost:5173" },
     });
     expect(res.statusCode).toBe(200);
     const clone = res.json().clone as Record<string, any>;
@@ -232,7 +232,7 @@ describe("listings sync + clone recovery API", () => {
     const put = await parts.app.inject({
       method: "PUT",
       url: `/api/listings/${HOT_WHEELS_ID}/clone/picks`,
-      headers: { cookie: cookieA },
+      headers: { cookie: cookieA, origin: "http://localhost:5173" },
       payload: {
         picks: { condition: "Used - Like New" },
         edits: { price: "$28" },
@@ -244,7 +244,7 @@ describe("listings sync + clone recovery API", () => {
     const get = await parts.app.inject({
       method: "GET",
       url: `/api/listings/${HOT_WHEELS_ID}/clone`,
-      headers: { cookie: cookieA },
+      headers: { cookie: cookieA, origin: "http://localhost:5173" },
     });
     expect(get.statusCode).toBe(200);
     expect(get.json().clone.picks).toEqual({ condition: "Used - Like New" });
@@ -259,7 +259,7 @@ describe("listings sync + clone recovery API", () => {
     const syncB = await parts.app.inject({
       method: "POST",
       url: "/api/listings/sync",
-      headers: { cookie: cookieB },
+      headers: { cookie: cookieB, origin: "http://localhost:5173" },
     });
     expect(syncB.statusCode).toBe(200);
     expect(syncB.json().listings).toEqual([]);
@@ -267,21 +267,21 @@ describe("listings sync + clone recovery API", () => {
     const recover = await parts.app.inject({
       method: "POST",
       url: `/api/listings/${SWITCHES_ID}/clone/recover`,
-      headers: { cookie: cookieB },
+      headers: { cookie: cookieB, origin: "http://localhost:5173" },
     });
     expect(recover.statusCode).toBe(404);
 
     const clone = await parts.app.inject({
       method: "GET",
       url: `/api/listings/${SWITCHES_ID}/clone`,
-      headers: { cookie: cookieB },
+      headers: { cookie: cookieB, origin: "http://localhost:5173" },
     });
     expect(clone.statusCode).toBe(404);
 
     const picks = await parts.app.inject({
       method: "PUT",
       url: `/api/listings/${SWITCHES_ID}/clone/picks`,
-      headers: { cookie: cookieB },
+      headers: { cookie: cookieB, origin: "http://localhost:5173" },
       payload: { picks: { condition: "New" }, edits: {}, photoSelection: null },
     });
     expect(picks.statusCode).toBe(404);
@@ -289,7 +289,7 @@ describe("listings sync + clone recovery API", () => {
     const photo = await parts.app.inject({
       method: "GET",
       url: `/api/listings/${SWITCHES_ID}/photos/0`,
-      headers: { cookie: cookieB },
+      headers: { cookie: cookieB, origin: "http://localhost:5173" },
     });
     expect(photo.statusCode).toBe(404);
   });
@@ -298,7 +298,7 @@ describe("listings sync + clone recovery API", () => {
     const res = await parts.app.inject({
       method: "PUT",
       url: `/api/listings/${HOT_WHEELS_ID}/clone/picks`,
-      headers: { cookie: cookieA },
+      headers: { cookie: cookieA, origin: "http://localhost:5173" },
       payload: { picks: { accountId: "someone-else" }, edits: {}, photoSelection: null },
     });
     expect(res.statusCode).toBe(400);

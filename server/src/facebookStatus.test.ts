@@ -14,6 +14,14 @@ describe("detectFacebookStatus", () => {
     expect(status).toBe("connected");
   });
 
+  it("does not treat a c_user cookie on a checkpoint page as connected", () => {
+    expect(detectFacebookStatus({
+      hasUserCookie: true,
+      url: "https://www.facebook.com/checkpoint/approval/",
+      previousStatus: "connected",
+    })).toBe("needs_check");
+  });
+
   it("stays login_in_progress on the login page without a cookie", () => {
     const status = detectFacebookStatus({
       hasUserCookie: false,

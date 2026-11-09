@@ -6,7 +6,10 @@
 // The launcher is injectable so tests can drive the manager with a fake
 // browser instead of a real Chromium.
 
-import { rm } from "node:fs/promises";
+import { AsyncLocalStorage } from "node:async_hooks";
+import { chmod, mkdir, readdir, rm, stat } from "node:fs/promises";
+import path from "node:path";
+import type { WebSocket } from "ws";
 import type { ProxyConfig } from "./config.js";
 import {
   detectFacebookStatus,
@@ -45,7 +48,7 @@ export interface PageLike {
 }
 
 export interface ContextLike {
-  cookies(url: string): Promise<Array<{ name: string }>>;
+  cookies(url: string): Promise<Array<{ name: string; value?: string }>>;
   clearCookies(): Promise<void>;
   close(): Promise<void>;
   pages(): PageLike[];
@@ -95,6 +98,11 @@ interface ActiveSession {
   poller: NodeJS.Timeout;
 }
 
+interface PendingLaunch {
+  promise: Promise<ActiveSession>;
+  cancelled: boolean;
+}
+
 /** Clicks the edit wizard's "Next" button if it is present and enabled.
  *  The marker comment lets test fakes recognise this call. */
 export const ADVANCE_WIZARD_SCRIPT = `/* relist-advance */ (() => {
@@ -139,7 +147,18 @@ const POLL_INTERVAL_MS = 2000;
 
 export class BrowserManager {
   private readonly sessions = new Map<string, ActiveSession>();
+  private readonly pendingLaunches = new Map<string, PendingLaunch>();
+  private readonly operationQueues = new Map<string, Promise<void>>();
+  private readonly operationQueueCounts = new Map<string, number>();
+  private readonly operationScope = new AsyncLocalStorage<string>();
+  private readonly closingUsers = new Set<string>();
+  private readonly disconnects = new Map<string, Promise<void>>();
+  private readonly sensitiveUrlMarkers = ["/login", "checkpoint", "two_factor", "confirm_identity"];
+  private readonly socketsByToken = new Map<string, Set<WebSocket>>();
+  private readonly socketsByUser = new Map<string, Set<WebSocket>>();
+  private shuttingDown = false;
   private readonly launcher: BrowserLauncher;
+  private readonly unsubscribeRevocation: () => void;
 
   constructor(
     private readonly store: Store,
@@ -148,6 +167,82 @@ export class BrowserManager {
     options: BrowserOptions = {},
   ) {
     this.launcher = launcher ?? makeDefaultLauncher(options);
+    this.unsubscribeRevocation = this.store.onSessionRevoked((tokenHash) => {
+      const sockets = this.socketsByToken.get(tokenHash);
+      if (!sockets) return;
+      for (const socket of sockets) {
+        try {
+          socket.close(4401, "Session expired or revoked");
+        } catch {
+          // A socket that is already closing needs no further action.
+        }
+      }
+      this.socketsByToken.delete(tokenHash);
+    });
+  }
+
+  /**
+   * Run one complete per-user browser transaction in FIFO order. This is
+   * intentionally non-reentrant: callers wrap sync/recovery/job work once
+   * and invoke low-level browser methods directly inside the callback.
+   * Lifecycle launch/cancellation is separate; disconnect rejects queued
+   * work and waits for the current callback before closing its session.
+   */
+  withUserOperation<T>(userId: string, operation: () => Promise<T>): Promise<T> {
+    if (this.operationScope.getStore() === userId) {
+      return Promise.reject(new Error("Browser user operations are non-reentrant"));
+    }
+    if (this.closingUsers.has(userId) || this.shuttingDown) {
+      return Promise.reject(new Error("Browser session is closing"));
+    }
+    const count = this.operationQueueCounts.get(userId) ?? 0;
+    if (count >= 64) {
+      return Promise.reject(new Error("Browser operation queue is full"));
+    }
+    this.operationQueueCounts.set(userId, count + 1);
+    const previous = this.operationQueues.get(userId) ?? Promise.resolve();
+    let release!: () => void;
+    const turn = new Promise<void>((resolve) => { release = resolve; });
+    const tail = previous.then(() => turn);
+    this.operationQueues.set(userId, tail);
+    return previous.then(() => {
+      if (this.closingUsers.has(userId) || this.shuttingDown) {
+        throw new Error("Browser session is closing");
+      }
+      return this.operationScope.run(userId, operation);
+    }).finally(() => {
+      release();
+      const remaining = (this.operationQueueCounts.get(userId) ?? 1) - 1;
+      if (remaining === 0) this.operationQueueCounts.delete(userId);
+      else this.operationQueueCounts.set(userId, remaining);
+      if (this.operationQueues.get(userId) === tail) this.operationQueues.delete(userId);
+    });
+  }
+
+  trackSocket(userId: string, tokenHash: string, socket: WebSocket): () => void {
+    const tokenSockets = this.socketsByToken.get(tokenHash) ?? new Set<WebSocket>();
+    tokenSockets.add(socket);
+    this.socketsByToken.set(tokenHash, tokenSockets);
+    const userSockets = this.socketsByUser.get(userId) ?? new Set<WebSocket>();
+    userSockets.add(socket);
+    this.socketsByUser.set(userId, userSockets);
+    return () => {
+      tokenSockets.delete(socket);
+      userSockets.delete(socket);
+      if (tokenSockets.size === 0) this.socketsByToken.delete(tokenHash);
+      if (userSockets.size === 0) this.socketsByUser.delete(userId);
+    };
+  }
+
+  private closeUserSockets(userId: string): void {
+    for (const socket of this.socketsByUser.get(userId) ?? []) {
+      try {
+        socket.close(4401, "Facebook session disconnected");
+      } catch {
+        // A socket that is already closing needs no further action.
+      }
+    }
+    this.socketsByUser.delete(userId);
   }
 
   hasActiveSession(userId: string): boolean {
@@ -164,30 +259,60 @@ export class BrowserManager {
    *  the profile on disk is the session, so after a server restart the
    *  first scrape reopens it and refreshStatus re-derives the state. */
   async ensureSession(userId: string): Promise<ActiveSession> {
-    let session = this.sessions.get(userId);
-    if (!session) {
-      const handle = await this.launcher(profileDirFor(this.dataDir, userId));
+    if (this.closingUsers.has(userId) || this.shuttingDown) {
+      throw new Error("Browser session is closing");
+    }
+    if (this.sessions.has(userId)) {
+      return this.sessions.get(userId)!;
+    }
+    const existing = this.pendingLaunches.get(userId);
+    if (existing) return existing.promise;
+
+    const pending: PendingLaunch = { promise: Promise.resolve(undefined as never), cancelled: false };
+    const promise = (async () => {
+      const profileDir = profileDirFor(this.dataDir, userId);
+      await mkdir(profileDir, { recursive: true, mode: 0o700 });
+      await chmod(profileDir, 0o700);
+      const handle = await this.launcher(profileDir);
+      if (pending.cancelled || this.shuttingDown) {
+        await handle.context.close().catch(() => undefined);
+        throw new Error("Browser launch was cancelled");
+      }
+      const profileStat = await stat(profileDir);
+      if ((profileStat.mode & 0o777) !== 0o700) await chmod(profileDir, 0o700);
       const poller = setInterval(() => {
-        void this.refreshStatus(userId);
+        if ((this.operationQueueCounts.get(userId) ?? 0) > 0) return;
+        void this.withUserOperation(userId, () => this.refreshStatus(userId)).catch(() => undefined);
       }, POLL_INTERVAL_MS);
       poller.unref();
-      session = { handle, poller };
+      const session = { handle, poller };
       this.sessions.set(userId, session);
+      return session;
+    })();
+    pending.promise = promise;
+    this.pendingLaunches.set(userId, pending);
+    try {
+      return await promise;
+    } finally {
+      if (this.pendingLaunches.get(userId) === pending) this.pendingLaunches.delete(userId);
     }
-    return session;
   }
 
   async startLogin(userId: string): Promise<FacebookStatus> {
+    return this.withUserOperation(userId, () => this.startLoginUnsafe(userId));
+  }
+
+  private async startLoginUnsafe(userId: string): Promise<FacebookStatus> {
     const session = await this.ensureSession(userId);
     await this.store.setFacebookStatus(userId, "login_in_progress");
     try {
       await session.handle.page.goto(FACEBOOK_LOGIN_URL);
     } catch {
-      // Navigation hiccups leave the page wherever it is; the remote view
-      // shows the real page either way and polling keeps tracking status.
+      // Navigation hiccups leave the page wherever it is; polling tracks status.
     }
     await this.refreshStatus(userId);
-    return this.statusOf(userId);
+    const status = this.statusOf(userId);
+    return status;
   }
 
   async refreshStatus(userId: string): Promise<FacebookStatus> {
@@ -196,7 +321,8 @@ export class BrowserManager {
       return this.statusOf(userId);
     }
     const cookies = await session.handle.context.cookies("https://www.facebook.com");
-    const hasUserCookie = cookies.some((cookie) => cookie.name === "c_user");
+    const userCookie = cookies.find((cookie) => cookie.name === "c_user");
+    const hasUserCookie = Boolean(userCookie);
     const next = detectFacebookStatus({
       hasUserCookie,
       url: session.handle.page.url(),
@@ -204,6 +330,17 @@ export class BrowserManager {
     });
     if (next !== this.statusOf(userId)) {
       await this.store.setFacebookStatus(userId, next);
+    }
+    if (next === "connected" && userCookie?.value) {
+      const previousIdentity = this.store.getFacebookIdentityHash(userId);
+      const identityChanged = await this.store.setFacebookIdentity(userId, userCookie.value);
+      if (identityChanged) {
+        await rm(path.join(this.dataDir, "archive", userId), { recursive: true, force: true });
+        if (previousIdentity) {
+          await this.store.setFacebookStatus(userId, "needs_check");
+          return "needs_check";
+        }
+      }
     }
     return next;
   }
@@ -218,25 +355,6 @@ export class BrowserManager {
     } catch {
       return null;
     }
-  }
-
-  async debugInfo(userId: string): Promise<{ url: string; title: string; emailValue: string | null } | null> {
-    const session = this.sessions.get(userId);
-    if (!session) {
-      return null;
-    }
-    const page = session.handle.page;
-    const title = String(await page.evaluate("document.title").catch(() => ""));
-    const emailValue = await page
-      .evaluate(
-        "(() => { const el = document.querySelector('input[name=\"email\"]'); return el ? el.value : null; })()",
-      )
-      .catch(() => null);
-    return {
-      url: page.url(),
-      title,
-      emailValue: typeof emailValue === "string" ? emailValue : null,
-    };
   }
 
   /**
@@ -269,7 +387,11 @@ export class BrowserManager {
     }
     try {
       const raw = await page.evaluate(SNAPSHOT_SCRIPT);
-      return coerceSnapshot(raw);
+      const snapshot = coerceSnapshot(raw);
+      if (snapshot && this.sensitiveUrlMarkers.some((marker) => page.url().toLowerCase().includes(marker))) {
+        snapshot.form = undefined;
+      }
+      return snapshot;
     } catch {
       return null;
     }
@@ -350,40 +472,59 @@ export class BrowserManager {
     return true;
   }
 
-  async disconnect(userId: string): Promise<void> {
+  private async closeSession(userId: string): Promise<void> {
+    this.closingUsers.add(userId);
+    this.closeUserSockets(userId);
+    const pending = this.pendingLaunches.get(userId);
+    if (pending) {
+      pending.cancelled = true;
+      this.pendingLaunches.delete(userId);
+    }
+    await pending?.promise.catch(() => undefined);
+    await this.operationQueues.get(userId)?.catch(() => undefined);
     const session = this.sessions.get(userId);
     if (session) {
       clearInterval(session.poller);
       this.sessions.delete(userId);
-      try {
-        await session.handle.context.clearCookies();
-      } catch {
-        // Profile directory is wiped below either way.
-      }
-      try {
-        await session.handle.context.close();
-      } catch {
-        // Already closed.
-      }
+      await session.handle.context.close().catch(() => undefined);
     }
-    await rm(profileDirFor(this.dataDir, userId), { recursive: true, force: true });
-    await this.store.setFacebookStatus(userId, "not_connected");
+  }
+
+  async disconnect(userId: string): Promise<void> {
+    const isNestedOperation = this.operationScope.getStore() === userId;
+    if (isNestedOperation) {
+      throw new Error("Disconnect cannot run inside a browser user operation");
+    }
+    const existing = this.disconnects.get(userId);
+    if (existing) return existing;
+    this.closingUsers.add(userId);
+    const disconnect = (async () => {
+      await this.closeSession(userId);
+      await rm(profileDirFor(this.dataDir, userId), { recursive: true, force: true });
+      await this.store.setFacebookStatus(userId, "not_connected");
+    })().finally(() => {
+      this.closingUsers.delete(userId);
+      if (this.disconnects.get(userId) === disconnect) this.disconnects.delete(userId);
+    });
+    this.disconnects.set(userId, disconnect);
+    return disconnect;
   }
 
   async closeAll(): Promise<void> {
-    const userIds = [...this.sessions.keys()];
-    for (const userId of userIds) {
-      const session = this.sessions.get(userId);
-      if (!session) {
-        continue;
-      }
-      clearInterval(session.poller);
-      this.sessions.delete(userId);
-      try {
-        await session.handle.context.close();
-      } catch {
-        // Already closed.
-      }
+    this.shuttingDown = true;
+    this.unsubscribeRevocation();
+    const userIds = [...new Set([
+      ...this.sessions.keys(),
+      ...this.operationQueues.keys(),
+      ...this.pendingLaunches.keys(),
+      ...this.disconnects.keys(),
+    ])];
+    for (const userId of userIds) this.closingUsers.add(userId);
+    await Promise.all(userIds.map((userId) => this.disconnects.get(userId) ?? this.closeSession(userId)));
+    for (const sockets of this.socketsByUser.values()) {
+      for (const socket of sockets) socket.close(1001, "Server shutting down");
     }
+    this.socketsByUser.clear();
+    this.socketsByToken.clear();
   }
 }

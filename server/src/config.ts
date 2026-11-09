@@ -15,18 +15,46 @@ export function parseProxyEnv(raw: string | undefined): ProxyConfig | undefined 
   if (!raw || raw === "none") {
     return undefined;
   }
+  let url: URL;
   try {
-    const url = new URL(raw);
-    const proxy: ProxyConfig = { server: `${url.protocol}//${url.host}` };
-    if (url.username) {
-      proxy.username = decodeURIComponent(url.username);
-    }
-    if (url.password) {
-      proxy.password = decodeURIComponent(url.password);
-    }
-    return proxy;
+    url = new URL(raw);
   } catch {
-    return undefined;
+    throw new Error("BROWSER_PROXY must be a valid explicit proxy URL");
+  }
+  if (url.protocol !== "http:") {
+    throw new Error("BROWSER_PROXY supports only http:// proxies; TLS proxying is not implemented");
+  }
+  const proxyHost = url.hostname.replace(/^\[(.*)\]$/, "$1").toLowerCase();
+  if (url.username && !["localhost", "127.0.0.1", "::1"].includes(proxyHost)) {
+    throw new Error("Credentials are allowed only for a loopback BROWSER_PROXY because the shim uses plaintext HTTP");
+  }
+  const proxy: ProxyConfig = { server: `${url.protocol}//${url.host}` };
+  if (url.username) {
+    proxy.username = decodeURIComponent(url.username);
+  }
+  if (url.password) {
+    proxy.password = decodeURIComponent(url.password);
+  }
+  return proxy;
+}
+
+const LOCAL_ORIGIN_HOSTS = new Set(["localhost", "127.0.0.1", "::1"]);
+
+export function isAllowedRequestOrigin(origin: string, configuredOrigin: string): boolean {
+  try {
+    const actual = new URL(origin);
+    const configured = new URL(configuredOrigin);
+    const isSerializedOrigin = (value: string, parsed: URL): boolean =>
+      parsed.origin === value && !parsed.username && !parsed.password &&
+      (parsed.pathname === "" || parsed.pathname === "/") && !parsed.search && !parsed.hash;
+    if (!isSerializedOrigin(origin, actual) || !isSerializedOrigin(configuredOrigin, configured)) return false;
+    if (origin === configuredOrigin) return true;
+    const actualHost = actual.hostname.replace(/^\[(.*)\]$/, "$1").toLowerCase();
+    const configuredHost = configured.hostname.replace(/^\[(.*)\]$/, "$1").toLowerCase();
+    return actual.protocol === configured.protocol && actual.port === configured.port &&
+      LOCAL_ORIGIN_HOSTS.has(actualHost) && LOCAL_ORIGIN_HOSTS.has(configuredHost);
+  } catch {
+    return false;
   }
 }
 
@@ -36,19 +64,10 @@ export interface Config {
   dataDir: string;
   corsOrigin: string;
   cookieSecure: boolean;
-  /**
-   * Proxy for the backend browser, from BROWSER_PROXY or the standard
-   * HTTPS_PROXY env. Needed inside sandboxes with an egress proxy; on the
-   * home server there is normally no proxy env and the browser connects
-   * directly. Never logged (it can carry credentials).
-   */
+  tls?: { keyFile: string; certFile: string };
+  /** Explicit browser proxy from BROWSER_PROXY; ambient proxy variables are ignored. */
   browserProxy?: ProxyConfig;
-  /**
-   * Sandbox-only escape hatch: ignore TLS certificate errors in the
-   * backend browser. Needed where an egress proxy MITMs TLS with a local
-   * CA that Chromium does not trust. NEVER enable on the home server —
-   * there the browser must verify Facebook's real certificates.
-   */
+  /** Always false: Facebook TLS certificate validation cannot be bypassed. */
   browserIgnoreCertErrors: boolean;
   /**
    * Sprint 3 safety switch: dry-run jobs. DEFAULT ON — a dry-run job
@@ -85,19 +104,41 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     ? rawDataDir
     : path.resolve(serverDir, "..", rawDataDir);
 
+  const rawHost = env.HOST ?? "127.0.0.1";
+  const normalizedHost = rawHost.replace(/^\[(.*)\]$/, "$1");
+  const explicitlyRemote = !["localhost", "127.0.0.1", "::1"].includes(normalizedHost);
+  const remote = explicitlyRemote;
+  const configuredSecureCookie = env.COOKIE_SECURE === "1";
+  if (remote && !configuredSecureCookie) {
+    throw new Error("COOKIE_SECURE=1 is required when HOST exposes Relist beyond loopback");
+  }
+  if (remote && !env.CORS_ORIGIN?.startsWith("https://")) {
+    throw new Error("CORS_ORIGIN must be an explicit https:// origin for network deployments");
+  }
+  if (Boolean(env.TLS_CERT_FILE) !== Boolean(env.TLS_KEY_FILE)) {
+    throw new Error("TLS_CERT_FILE and TLS_KEY_FILE must be configured together");
+  }
+  if (remote && (!env.TLS_CERT_FILE || !env.TLS_KEY_FILE)) {
+    throw new Error("TLS_CERT_FILE and TLS_KEY_FILE are required for network deployments");
+  }
+  if (env.BROWSER_IGNORE_CERT_ERRORS === "1") {
+    throw new Error("BROWSER_IGNORE_CERT_ERRORS is prohibited; Facebook certificate validation must remain enabled");
+  }
+
   return {
     port: Number(env.PORT ?? 8787),
-    // Dual-stack bind by default: "::" answers on both IPv6 (::1) and
-    // IPv4 (127.0.0.1). Some browsers resolve "localhost" to ::1 first,
-    // so an IPv4-only bind makes the backend unreachable depending on
-    // which loopback spelling the browser picks. HOST overrides.
-    host: env.HOST ?? "::",
+    // Bind to loopback by default. A non-loopback HOST requires explicit TLS posture.
+    host: rawHost,
     dataDir,
     corsOrigin: env.CORS_ORIGIN ?? "http://localhost:5173",
-    cookieSecure: env.COOKIE_SECURE === "1",
-    browserProxy: parseProxyEnv(env.BROWSER_PROXY ?? env.HTTPS_PROXY ?? env.https_proxy),
-    browserIgnoreCertErrors: env.BROWSER_IGNORE_CERT_ERRORS === "1",
-    dryRun: env.RELIST_DRY_RUN !== "0",
+    cookieSecure: configuredSecureCookie,
+    tls: env.TLS_CERT_FILE && env.TLS_KEY_FILE
+      ? { certFile: path.resolve(env.TLS_CERT_FILE), keyFile: path.resolve(env.TLS_KEY_FILE) }
+      : undefined,
+    browserProxy: parseProxyEnv(env.BROWSER_PROXY),
+    browserIgnoreCertErrors: false,
+    // Live create/delete stays closed pending an owner-approved release gate.
+    dryRun: true,
     jobPollIntervalMs: parsePositiveMs(env.RELIST_POLL_INTERVAL_MS, 15 * 60 * 1000),
     jobStuckAfterMs: parsePositiveMs(env.RELIST_STUCK_AFTER_MS, 48 * 60 * 60 * 1000),
   };

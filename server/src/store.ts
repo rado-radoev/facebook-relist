@@ -10,7 +10,7 @@
 // token, so reading the data file does not hand out a live session.
 
 import { createHash, randomBytes, randomUUID } from "node:crypto";
-import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
+import { chmod, mkdir, open, readFile, rename, rm } from "node:fs/promises";
 import path from "node:path";
 import type {
   CloneEdits,
@@ -58,10 +58,11 @@ interface StoreData {
   jobs: Record<string, RecreateJob[]>;
   /** Sprint 3: completed recreates, per user, newest last. */
   history: Record<string, JobHistoryEntry[]>;
+  facebookIdentityHashes?: Record<string, string>;
 }
 
 function emptyData(): StoreData {
-  return { users: [], sessions: [], listings: {}, clones: {}, jobs: {}, history: {} };
+  return { users: [], sessions: [], listings: {}, clones: {}, jobs: {}, history: {}, facebookIdentityHashes: {} };
 }
 
 export function hashToken(token: string): string {
@@ -76,33 +77,88 @@ export class Store {
   private readonly filePath: string;
   private data: StoreData = emptyData();
   private loaded = false;
+  private saveQueue: Promise<void> = Promise.resolve();
+  private readonly expiredSessionsNotified = new Set<string>();
+  private readonly sessionRevocationListeners = new Set<(tokenHash: string) => void>();
 
   constructor(private readonly dataDir: string) {
     this.filePath = path.join(dataDir, "relist-data.json");
   }
 
   async load(): Promise<void> {
-    await mkdir(this.dataDir, { recursive: true });
+    await mkdir(this.dataDir, { recursive: true, mode: 0o700 });
+    await chmod(this.dataDir, 0o700);
+    let raw: string;
     try {
-      const raw = await readFile(this.filePath, "utf8");
-      const parsed = JSON.parse(raw) as Partial<StoreData>;
-      // Tolerate data files written before Sprint 2 (no listings/clones).
-      this.data = { ...emptyData(), ...parsed };
-    } catch {
-      this.data = emptyData();
+      raw = await readFile(this.filePath, "utf8");
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+        this.data = emptyData();
+        this.loaded = true;
+        return;
+      }
+      throw error;
     }
+
+    await chmod(this.filePath, 0o600);
+
+    const parsed: unknown = JSON.parse(raw);
+    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+      throw new Error("Store file has an invalid shape");
+    }
+    const record = parsed as Partial<StoreData>;
+    if (!Array.isArray(record.users) || !Array.isArray(record.sessions)) {
+      throw new Error("Store file is missing required account data");
+    }
+    for (const key of ["listings", "clones", "jobs", "history"] as const) {
+      if (record[key] !== undefined && (typeof record[key] !== "object" || record[key] === null || Array.isArray(record[key]))) {
+        throw new Error(`Store file has invalid ${key} data`);
+      }
+    }
+    this.data = { ...emptyData(), ...record };
     this.loaded = true;
   }
 
-  private async save(): Promise<void> {
-    // A unique tmp path per save: concurrent writers (e.g. the Sprint 3
-    // job runner alongside a request) must never rename each other's
-    // tmp file out from under them. Each rename is still atomic, and
-    // every save serializes the same in-memory state, so the last
-    // rename wins with a complete document.
-    const tmpPath = `${this.filePath}.tmp-${randomUUID()}`;
-    await writeFile(tmpPath, JSON.stringify(this.data, null, 2), "utf8");
-    await rename(tmpPath, this.filePath);
+  private save(): Promise<void> {
+    const write = async (): Promise<void> => {
+      const tmpPath = `${this.filePath}.tmp-${randomUUID()}`;
+      let handle: Awaited<ReturnType<typeof open>> | undefined;
+      try {
+        handle = await open(tmpPath, "wx", 0o600);
+        await handle.writeFile(JSON.stringify(this.data, null, 2), "utf8");
+        await handle.sync();
+        await handle.close();
+        handle = undefined;
+        await rename(tmpPath, this.filePath);
+        await chmod(this.filePath, 0o600);
+        const directory = await open(this.dataDir, "r");
+        try {
+          await directory.sync();
+        } finally {
+          await directory.close();
+        }
+      } catch (error) {
+        if (handle) {
+          await handle.close().catch(() => undefined);
+        }
+        await rm(tmpPath, { force: true }).catch(() => undefined);
+        throw error;
+      }
+    };
+    const result = this.saveQueue.then(write, write);
+    this.saveQueue = result.catch(() => undefined);
+    return result;
+  }
+
+  onSessionRevoked(listener: (tokenHash: string) => void): () => void {
+    this.sessionRevocationListeners.add(listener);
+    return () => this.sessionRevocationListeners.delete(listener);
+  }
+
+  private notifySessionRevoked(tokenHash: string): void {
+    for (const listener of this.sessionRevocationListeners) {
+      listener(tokenHash);
+    }
   }
 
   private ensureLoaded(): void {
@@ -138,6 +194,14 @@ export class Store {
     return this.data.users.find((user) => user.id === id);
   }
 
+  async updatePasswordHash(userId: string, passwordHash: string): Promise<void> {
+    this.ensureLoaded();
+    const user = this.findUserById(userId);
+    if (!user) return;
+    user.passwordHash = passwordHash;
+    await this.save();
+  }
+
   async setFacebookStatus(userId: string, status: FacebookStatus): Promise<void> {
     this.ensureLoaded();
     const user = this.findUserById(userId);
@@ -152,6 +216,27 @@ export class Store {
       user.facebookConnectedAt = null;
     }
     await this.save();
+  }
+
+  getFacebookIdentityHash(userId: string): string | null {
+    this.ensureLoaded();
+    return this.data.facebookIdentityHashes?.[userId] ?? null;
+  }
+
+  async setFacebookIdentity(userId: string, identity: string): Promise<boolean> {
+    this.ensureLoaded();
+    const identityHash = createHash("sha256").update(identity).digest("hex");
+    const current = this.data.facebookIdentityHashes?.[userId];
+    if (current === identityHash) return false;
+    delete this.data.listings[userId];
+    delete this.data.clones[userId];
+    delete this.data.jobs[userId];
+    delete this.data.history[userId];
+    const hashes = this.data.facebookIdentityHashes ?? {};
+    hashes[userId] = identityHash;
+    this.data.facebookIdentityHashes = hashes;
+    await this.save();
+    return true;
   }
 
   async createSession(userId: string): Promise<string> {
@@ -177,6 +262,10 @@ export class Store {
       return undefined;
     }
     if (Date.parse(record.expiresAt) < Date.now()) {
+      if (!this.expiredSessionsNotified.has(tokenHash)) {
+        this.expiredSessionsNotified.add(tokenHash);
+        this.notifySessionRevoked(tokenHash);
+      }
       return undefined;
     }
     return this.findUserById(record.userId);
@@ -187,6 +276,7 @@ export class Store {
     const tokenHash = hashToken(token);
     this.data.sessions = this.data.sessions.filter((session) => session.tokenHash !== tokenHash);
     await this.save();
+    this.notifySessionRevoked(tokenHash);
   }
 
   // -- Sprint 2: synced listings + clone records (all per-user) -----------

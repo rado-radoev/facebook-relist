@@ -190,7 +190,7 @@ export const SNAPSHOT_SCRIPT = `(() => {
 
   const inputs = [];
   for (const el of document.querySelectorAll("input, textarea")) {
-    if (el.type === "checkbox" || el.type === "radio" || el.type === "hidden") {
+    if (el.type === "checkbox" || el.type === "radio" || el.type === "hidden" || el.type === "password") {
       continue;
     }
     inputs.push({ label: labelFor(el), value: el.value || "" });

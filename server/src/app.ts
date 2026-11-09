@@ -1,10 +1,11 @@
+import { readFileSync } from "node:fs";
 import cookie from "@fastify/cookie";
 import cors from "@fastify/cors";
 import websocket from "@fastify/websocket";
 import Fastify, { type FastifyInstance } from "fastify";
 import { registerAuthRoutes } from "./auth.js";
 import { BrowserManager, type BrowserLauncher } from "./browserManager.js";
-import type { Config } from "./config.js";
+import { isAllowedRequestOrigin, type Config } from "./config.js";
 import { buildCorsOrigin } from "./corsOrigin.js";
 import { startConnectShim, type ConnectShim } from "./connectShim.js";
 import {
@@ -70,7 +71,15 @@ export async function buildApp(options: BuildOptions): Promise<AppParts> {
     ...options.jobOptions,
   });
 
-  const app = Fastify({ logger: false });
+  const app = Fastify({
+    logger: false,
+    ...(config.tls ? {
+      https: {
+        key: readFileSync(config.tls.keyFile),
+        cert: readFileSync(config.tls.certFile),
+      },
+    } : {}),
+  });
 
   // The API client sends body-less action POSTs (connect, disconnect,
   // sync, recover, job create, logout) that can carry a
@@ -100,10 +109,28 @@ export async function buildApp(options: BuildOptions): Promise<AppParts> {
   await app.register(cors, { origin: buildCorsOrigin(config.corsOrigin), credentials: true });
   await app.register(websocket);
 
+  app.addHook("onRequest", async (request, reply) => {
+    const origin = request.headers.origin;
+    const isBrowserSocket = request.method === "GET" && request.url.split("?", 1)[0] === "/api/facebook/view";
+    if (isBrowserSocket && (!origin || !isAllowedRequestOrigin(origin, config.corsOrigin))) {
+      await reply.code(403).send({ error: "WebSocket Origin is not allowed" });
+      return;
+    }
+    if (request.method === "GET" || request.method === "HEAD" || request.method === "OPTIONS") return;
+    const hasSession = Boolean(request.cookies?.relist_session);
+    if (hasSession && !origin) {
+      await reply.code(403).send({ error: "State-changing requests require the configured Origin" });
+      return;
+    }
+    if (origin && !isAllowedRequestOrigin(origin, config.corsOrigin)) {
+      await reply.code(403).send({ error: "Origin is not allowed" });
+    }
+  });
+
   app.get("/api/health", async () => ({ ok: true }));
 
   registerAuthRoutes(app, store, config);
-  registerFacebookRoutes(app, store, browser);
+  registerFacebookRoutes(app, store, browser, config.corsOrigin);
   registerListingsRoutes(app, store, scraper, config.dataDir);
   registerJobRoutes(app, store, jobs, browser);
 

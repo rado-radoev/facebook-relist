@@ -233,7 +233,7 @@ describe("recreate job API", () => {
     const res = await parts.app.inject({
       method: "POST",
       url: `/api/listings/${OLD_ID}/jobs`,
-      headers: { cookie: cookieC },
+      headers: { cookie: cookieC, origin: "http://localhost:5173" },
     });
     expect(res.statusCode).toBe(409);
   });
@@ -245,7 +245,7 @@ describe("recreate job API", () => {
     const create = await parts.app.inject({
       method: "POST",
       url: `/api/listings/${OLD_ID}/jobs`,
-      headers: { cookie: cookieA },
+      headers: { cookie: cookieA, origin: "http://localhost:5173" },
     });
     expect(create.statusCode).toBe(201);
     const job = create.json().job as Record<string, any>;
@@ -261,7 +261,7 @@ describe("recreate job API", () => {
     const mid = await parts.app.inject({
       method: "GET",
       url: `/api/jobs/${jobId}`,
-      headers: { cookie: cookieA },
+      headers: { cookie: cookieA, origin: "http://localhost:5173" },
     });
     expect(mid.json().job.status).toBe("in_review");
     expect(mid.json().job.newListingId).toBe(NEW_ID);
@@ -271,14 +271,14 @@ describe("recreate job API", () => {
     const done = await parts.app.inject({
       method: "GET",
       url: `/api/jobs/${jobId}`,
-      headers: { cookie: cookieA },
+      headers: { cookie: cookieA, origin: "http://localhost:5173" },
     });
     expect(done.json().job.status).toBe("done");
 
     const history = await parts.app.inject({
       method: "GET",
       url: "/api/history",
-      headers: { cookie: cookieA },
+      headers: { cookie: cookieA, origin: "http://localhost:5173" },
     });
     expect(history.json().history).toHaveLength(1);
     expect(history.json().history[0].newListingId).toBe(NEW_ID);
@@ -290,13 +290,13 @@ describe("recreate job API", () => {
     const first = await parts.app.inject({
       method: "POST",
       url: `/api/listings/${OLD_ID}/jobs`,
-      headers: { cookie },
+      headers: { cookie, origin: "http://localhost:5173" },
     });
     expect(first.statusCode).toBe(201);
     const second = await parts.app.inject({
       method: "POST",
       url: `/api/listings/${OLD_ID}/jobs`,
-      headers: { cookie },
+      headers: { cookie, origin: "http://localhost:5173" },
     });
     expect(second.statusCode).toBe(200);
     expect(second.json().job.id).toBe(first.json().job.id);
@@ -312,7 +312,7 @@ describe("recreate job API", () => {
     const res = await parts.app.inject({
       method: "POST",
       url: `/api/listings/${OLD_ID}/jobs`,
-      headers: { cookie: cookieB },
+      headers: { cookie: cookieB, origin: "http://localhost:5173" },
     });
     expect(res.statusCode).toBe(400);
     expect(res.json().missing).toEqual(["condition"]);
@@ -322,7 +322,7 @@ describe("recreate job API", () => {
     const res = await parts.app.inject({
       method: "POST",
       url: "/api/listings/999/jobs",
-      headers: { cookie: cookieB },
+      headers: { cookie: cookieB, origin: "http://localhost:5173" },
     });
     expect(res.statusCode).toBe(404);
   });
@@ -331,21 +331,21 @@ describe("recreate job API", () => {
     const job = await parts.app.inject({
       method: "GET",
       url: `/api/jobs/${jobId}`,
-      headers: { cookie: cookieB },
+      headers: { cookie: cookieB, origin: "http://localhost:5173" },
     });
     expect(job.statusCode).toBe(404);
 
     const list = await parts.app.inject({
       method: "GET",
       url: "/api/jobs",
-      headers: { cookie: cookieB },
+      headers: { cookie: cookieB, origin: "http://localhost:5173" },
     });
     expect(list.json().jobs).toEqual([]);
 
     const history = await parts.app.inject({
       method: "GET",
       url: "/api/history",
-      headers: { cookie: cookieB },
+      headers: { cookie: cookieB, origin: "http://localhost:5173" },
     });
     expect(history.json().history).toEqual([]);
   });
