@@ -1,6 +1,7 @@
 import { mkdtemp, rm, stat } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { execFileSync } from "node:child_process";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { buildApp, type AppParts } from "./app.js";
 import type { BrowserHandle, ContextLike, PageLike } from "./browserManager.js";
@@ -50,6 +51,7 @@ function makeFakeHandle(): BrowserHandle {
         return null;
       }
       if (launch !== FIXTURE_LAUNCH) {
+        const isSellingList = currentUrl.includes("/marketplace/you/selling");
         const empty: PageSnapshot = {
           url: currentUrl,
           text: "",
@@ -58,6 +60,12 @@ function makeFakeHandle(): BrowserHandle {
           sellingCards: [],
           detailRows: [],
           form: { inputs: [], selects: [], checkboxes: [], switches: [], buttons: [] },
+          surface: {
+            kind: isSellingList ? "selling_list" : "unknown",
+            listingId: null,
+            readiness: "ready",
+          },
+          ...(isSellingList ? { completion: { state: "complete", expectedCount: 0, observedCount: 0 } } : {}),
         };
         return empty;
       }
@@ -78,7 +86,9 @@ function makeFakeHandle(): BrowserHandle {
   return { context, page };
 }
 
-const fakeDownloader = async (url: string): Promise<Buffer> => Buffer.from(`bytes:${url}`);
+const VALID_JPEG = Buffer.from("/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAP//////////////////////////////////////////////////////////////////////////////////////2wBDAf//////////////////////////////////////////////////////////////////////////////////////wAARCAABAAEDASIAAhEBAxEB/8QAFQABAQAAAAAAAAAAAAAAAAAAAAf/xAAUEAEAAAAAAAAAAAAAAAAAAAAA/9oADAMBAAIQAxAAAAH/AP/EABQQAQAAAAAAAAAAAAAAAAAAAAD/2gAIAQMBAT8BP//EABQQAQAAAAAAAAAAAAAAAAAAAAD/2gAIAQIBAT8BP//Z", "base64");
+const VALID_MP4 = execFileSync("ffmpeg", ["-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i", "color=c=black:s=16x16:d=0.1", "-an", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-movflags", "+frag_keyframe+empty_moov", "-f", "mp4", "pipe:1"]);
+const fakeDownloader = async (url: string): Promise<Buffer> => Buffer.from(url.includes("video") ? VALID_MP4 : VALID_JPEG);
 
 let dataDir: string;
 let parts: AppParts;
@@ -228,7 +238,7 @@ describe("listings sync + clone recovery API", () => {
       "archive",
       userAId,
       SWITCHES_ID,
-      "photo-1.jpg",
+      clone.recovery.photos.files[0],
     );
     const info = await stat(photoPath);
     expect(info.size).toBeGreaterThan(0);

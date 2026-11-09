@@ -432,17 +432,21 @@ export class FacebookDriver implements MarketplaceDriver {
         await this.pace();
       }
       if (data.delivery.meetup) {
+        const meetup = data.delivery.meetup;
+        if (meetup.public === null || meetup.doorPickup === null || meetup.doorDropoff === null) {
+          return { kind: "blocked", reason: "One or more meetup preferences are unknown; choose each value before continuing." };
+        }
         await this.browser.runScript(
           userId,
-          setCheckboxScript("public meetup", data.delivery.meetup.public),
+          setCheckboxScript("public meetup", meetup.public),
         );
         await this.browser.runScript(
           userId,
-          setCheckboxScript("door pickup", data.delivery.meetup.doorPickup),
+          setCheckboxScript("door pickup", meetup.doorPickup),
         );
         await this.browser.runScript(
           userId,
-          setCheckboxScript("door dropoff", data.delivery.meetup.doorDropoff),
+          setCheckboxScript("door dropoff", meetup.doorDropoff),
         );
         await this.pace();
       }

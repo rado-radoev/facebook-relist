@@ -50,11 +50,19 @@ describe("parseSellingCards", () => {
 });
 
 describe("normalizeSellingStatus / parseListedDate", () => {
-  it("normalizes the selling-list vocabulary", () => {
+  it("normalizes exact status tokens and keeps unknown or conflicting states unknown", () => {
     expect(normalizeSellingStatus("Active · Listed on 10/11")).toBe("Available");
     expect(normalizeSellingStatus("Sold")).toBe("Sold");
     expect(normalizeSellingStatus("Out of stock")).toBe("Out of stock");
     expect(normalizeSellingStatus("In stock · Listed on 3/4")).toBe("In stock");
+    expect(normalizeSellingStatus("Rejected · Mark as sold")).toBe("Unknown");
+    expect(normalizeSellingStatus("In Review · Active")).toBe("Unknown");
+    expect(normalizeSellingStatus("Draft")).toBe("Unknown");
+    expect(normalizeSellingStatus("Soldier toy · Active")).toBe("Available");
+    expect(normalizeSellingStatus("Active · Mark as sold")).toBe("Unknown");
+    expect(normalizeSellingStatus("Mark as sold")).toBe("Unknown");
+    expect(normalizeSellingStatus("Available · In review")).toBe("Unknown");
+    expect(normalizeSellingStatus("  ")).toBe("Unknown");
   });
 
   it("infers the most recent matching year for listed dates", () => {
@@ -90,6 +98,13 @@ describe("parseEditForm — Mechanical Keyboard Switches (full pass)", () => {
     });
     expect(edit?.conditionEmpty).toBe(false);
     expect(edit?.step2Blocked).toBe(false);
+  });
+
+  it("preserves each unobserved meetup option as unknown", () => {
+    const step2 = structuredClone(switchesEditStep2Snapshot) as PageSnapshot;
+    step2.form!.checkboxes = step2.form!.checkboxes.filter((box) => box.label !== "Door pickup");
+    const edit = parseEditForm(switchesEditStep1Snapshot, step2);
+    expect(edit?.delivery?.meetup).toEqual({ public: false, doorPickup: null, doorDropoff: false });
   });
 
   it("recovers Step 2 exactly: San Diego, local pickup only, no shipping, no meetup prefs", () => {
@@ -147,13 +162,36 @@ describe("parseListingDetails", () => {
 });
 
 describe("buildCloneFields", () => {
+  it("preserves explicit recovery state for attributes when the form and details did not establish a value", () => {
+    const fields = buildCloneFields(null, {
+      condition: null,
+      attributes: {},
+      attributesObserved: false,
+      hasConditionPrompt: false,
+      locationLabel: null,
+    });
+    expect(fields.attributes).toMatchObject({ value: null, state: "unknown" });
+  });
+
+  it("does not treat an empty Details row list as positive attribute observation", () => {
+    const snapshot = {
+      ...switchesListingSnapshot,
+      detailRows: [],
+    };
+    expect(parseListingDetails(snapshot).attributesObserved).toBe(false);
+    expect(parseListingDetails({
+      ...snapshot,
+      detailRows: [{ label: "Condition", value: "Used" }],
+    }).attributesObserved).toBe(false);
+  });
+
   it("switches: every field recovered, edit form first", () => {
     const edit = parseEditForm(switchesEditStep1Snapshot, switchesEditStep2Snapshot);
     const fields = buildCloneFields(edit, parseListingDetails(switchesListingSnapshot));
     expect(fields.title.value).toContain("Mechanical Keyboard");
     expect(fields.price.value).toBe("$30");
-    expect(fields.category).toEqual({ value: "Keyboards & Keypads", source: "edit_form", reason: null });
-    expect(fields.condition).toEqual({ value: "Used - Like New", source: "edit_form", reason: null });
+    expect(fields.category).toEqual({ value: "Keyboards & Keypads", source: "edit_form", state: "recovered", reason: null });
+    expect(fields.condition).toEqual({ value: "Used - Like New", source: "edit_form", state: "recovered", reason: null });
     expect(fields.delivery.value?.type).toBe("Local pickup only");
     expect(fields.delivery.value?.shipping).toBe(false);
     expect(fields.location.value).toBe("San Diego");
@@ -163,12 +201,12 @@ describe("buildCloneFields", () => {
   it("hot wheels: condition + delivery missing with honest reasons, location falls back to the listing page", () => {
     const edit = parseEditForm(hotWheelsEditSnapshot, null);
     const fields = buildCloneFields(edit, parseListingDetails(hotWheelsListingSnapshot));
-    expect(fields.category).toEqual({ value: "Toys & Games", source: "edit_form", reason: null });
+    expect(fields.category).toEqual({ value: "Toys & Games", source: "edit_form", state: "recovered", reason: null });
     expect(fields.condition.value).toBeNull();
     expect(fields.condition.reason).toContain("Add info about your item's condition");
     expect(fields.delivery.value).toBeNull();
     expect(fields.delivery.reason).toContain("blocked Step 2");
-    expect(fields.location).toEqual({ value: "San Diego, CA", source: "listing_details", reason: null });
+    expect(fields.location).toEqual({ value: "San Diego, CA", source: "listing_details", state: "recovered", reason: null });
     expect(fields.step2Blocked).toBe(true);
   });
 
@@ -181,6 +219,6 @@ describe("buildCloneFields", () => {
     const edit = parseEditForm(step1, switchesEditStep2Snapshot);
     expect(edit?.condition).toBeNull();
     const fields = buildCloneFields(edit, parseListingDetails(switchesListingSnapshot));
-    expect(fields.condition).toEqual({ value: "Used - Like New", source: "listing_details", reason: null });
+    expect(fields.condition).toEqual({ value: "Used - Like New", source: "listing_details", state: "recovered", reason: null });
   });
 });

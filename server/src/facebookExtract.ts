@@ -13,6 +13,7 @@
 import {
   missing,
   recovered,
+  unknown,
   type DeliveryInfo,
   type FieldResult,
   type MeetupPrefs,
@@ -38,17 +39,27 @@ export function listingIdFromHref(href: string): string | null {
  * keeps that state.
  */
 export function normalizeSellingStatus(statusText: string): string {
-  const lower = statusText.toLowerCase();
-  if (lower.includes("out of stock")) {
-    return "Out of stock";
+  const tokens = statusText
+    .split(/[\n·•|]+/)
+    .map((token) => token.trim().toLowerCase())
+    .filter(Boolean);
+  const blockedStates = new Set(["draft", "rejected", "in review", "review", "pending", "unavailable"]);
+  if (tokens.some((token) => blockedStates.has(token) || token.startsWith("mark as ") || ["renew", "delete", "edit", "boost"].some((action) => token.startsWith(`${action} `)))) {
+    return "Unknown";
   }
-  if (lower.includes("sold")) {
-    return "Sold";
+  const recognized = new Set<string>();
+  for (const token of tokens) {
+    if (token === "out of stock") {
+      recognized.add("Out of stock");
+    } else if (token === "in stock") {
+      recognized.add("In stock");
+    } else if (token === "sold") {
+      recognized.add("Sold");
+    } else if (token === "active") {
+      recognized.add("Available");
+    }
   }
-  if (lower.includes("in stock")) {
-    return "In stock";
-  }
-  return "Available";
+  return recognized.size === 1 ? [...recognized][0] : "Unknown";
 }
 
 /** "Listed on 10/11" → ISO date, inferring the most recent matching year. */
@@ -130,6 +141,7 @@ export interface EditFormData {
   category: string | null;
   condition: string | null;
   attributes: Record<string, string>;
+  attributesObserved: boolean;
   location: string | null;
   delivery: DeliveryInfo | null;
   /** True when a Step 2 snapshot was read (reachable or not). */
@@ -179,9 +191,9 @@ function parseMeetup(checkboxes: FormSnapshot["checkboxes"]): MeetupPrefs | null
     return null;
   }
   return {
-    public: publicBox ? publicBox.checked : false,
-    doorPickup: pickupBox ? pickupBox.checked : false,
-    doorDropoff: dropoffBox ? dropoffBox.checked : false,
+    public: publicBox?.checked ?? null,
+    doorPickup: pickupBox?.checked ?? null,
+    doorDropoff: dropoffBox?.checked ?? null,
   };
 }
 
@@ -232,6 +244,7 @@ export function parseEditForm(
   }
 
   const attributes: Record<string, string> = {};
+  let condition: string | null = null;
   for (const select of form.selects) {
     const label = select.label.trim();
     const lower = label.toLowerCase();
@@ -257,6 +270,7 @@ export function parseEditForm(
     delivery = parseDelivery(step2.form);
   }
 
+  const attributesObserved = form.attributesObserved === true;
   return {
     title: findInput(form, "title"),
     price: formatPrice(findInput(form, "price")),
@@ -264,6 +278,7 @@ export function parseEditForm(
     category: findSelect(form, "category"),
     condition: conditionRaw ? normalizeCondition(conditionRaw) : null,
     attributes,
+    attributesObserved,
     location,
     delivery,
     step2Seen,
@@ -278,6 +293,7 @@ export function parseEditForm(
 export interface ListingDetailsData {
   condition: string | null;
   attributes: Record<string, string>;
+  attributesObserved: boolean;
   /** The page itself carries Facebook's "add a condition" prompt — proof
    *  the listing has no condition stored anywhere on Facebook. */
   hasConditionPrompt: boolean;
@@ -305,6 +321,9 @@ export function parseListingDetails(snapshot: PageSnapshot): ListingDetailsData 
   return {
     condition,
     attributes,
+    attributesObserved: (snapshot.detailRows ?? []).some((row) =>
+      row.label.trim().length > 0 && row.value.trim().length > 0 && row.label.trim().toLowerCase() !== "condition",
+    ),
     hasConditionPrompt: snapshot.text.includes("Add info about your item's condition"),
     locationLabel: locationMatch ? locationMatch[1] : null,
   };
@@ -312,6 +331,9 @@ export function parseListingDetails(snapshot: PageSnapshot): ListingDetailsData 
 
 /** Gallery photo URLs in original order (duplicates removed). */
 export function parseGallery(snapshot: PageSnapshot): string[] {
+  if (snapshot.gallery?.slots) {
+    return snapshot.gallery.slots.map((slot) => slot.url);
+  }
   const seen = new Set<string>();
   const urls: string[] = [];
   for (const url of snapshot.images) {
@@ -395,9 +417,10 @@ export function buildCloneFields(
       mergedAttributes[label] = value;
     }
   }
-  const attributes: FieldResult<Record<string, string>> = edit
-    ? recovered(mergedAttributes, "edit_form")
-    : recovered(mergedAttributes, "listing_details");
+  const attributesObserved = Boolean(edit?.attributesObserved || details.attributesObserved);
+  const attributes: FieldResult<Record<string, string>> = attributesObserved
+    ? recovered(mergedAttributes, edit?.attributesObserved ? "edit_form" : "listing_details")
+    : unknown("Facebook attributes were not positively observed on the edit or listing surface.");
 
   let location: FieldResult<string>;
   if (edit && edit.location) {
