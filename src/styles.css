@@ -557,6 +557,93 @@ button {
   gap: 6px;
 }
 
+/* Photo editor (clone preview) */
+.photo-editor {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-top: 6px;
+}
+
+.photo-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.photo-tile {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  width: 96px;
+}
+
+.photo-tile-img {
+  width: 96px;
+  height: 96px;
+  object-fit: cover;
+  border-radius: 10px;
+  border: 1px solid var(--surface);
+}
+
+.photo-tile-placeholder {
+  width: 96px;
+  height: 96px;
+  border: 1px dashed var(--overlay);
+  border-radius: 10px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  font-size: 10.5px;
+  line-height: 1.35;
+  color: var(--subtext);
+  padding: 6px;
+}
+
+.photo-tile-label {
+  font-size: 11.5px;
+  color: var(--subtext);
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  flex-wrap: wrap;
+}
+
+.photo-tile-tag {
+  padding: 0 6px;
+  border-radius: 999px;
+  background: var(--accent);
+  color: var(--base);
+  font-size: 10px;
+  font-weight: 700;
+}
+
+.photo-tile-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.photo-tile-button {
+  background: none;
+  border: none;
+  padding: 2px 0;
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--accent);
+  cursor: pointer;
+}
+
+.photo-empty {
+  color: var(--yellow);
+  font-size: 13.5px;
+}
+
+.photo-add-button {
+  align-self: flex-start;
+  cursor: pointer;
+}
+
 .blocked-note {
   color: var(--yellow);
   font-size: 14px;

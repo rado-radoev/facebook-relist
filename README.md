@@ -53,8 +53,13 @@ What works now:
   listing** so the same item never asks twice (localStorage in this seed
   UI; the backend store from Sprint 2). Every **already-set** field gets
   an **Edit** option too (the same option chips for category / condition /
-  delivery; text editors for title / price / description / location): an
-  edited value is marked **Edited** and is the value the recreate uses.
+  delivery; text editors for title / price / description / location; a
+  photo editor for photos — remove / replace / add). An edited value is
+  marked **Edited** and is the value the recreate uses; the recovered
+  originals are never modified. **All** clone-check items are editable —
+  no row is display-only. (Photo edits are session-only in this seed UI;
+  from Sprint 2 the backend archive persists them like the other
+  picks/edits.)
 - **Condition recovery order (verified live 2026-11-09, for Sprint 2):**
   edit form → buyer-facing listing page's **Details** section (it shows
   "Condition — Used - like new" when the listing has one) → ask with

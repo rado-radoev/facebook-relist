@@ -1,11 +1,13 @@
 import { useState } from "react";
 import type { Listing } from "../types";
 import { FIELD_OPTIONS, type FieldPicks, type PickableField } from "../lib/fieldOptions";
+import type { PhotoTile } from "../lib/photos";
+import PhotoEditor from "./PhotoEditor";
 
 export type CheckState = "ok" | "warn" | "unknown" | "missing";
 
-/** Fields the person can edit in the clone preview. */
-export type EditableField = PickableField | "title" | "price" | "description" | "location";
+/** Fields the person can edit in the clone preview — all of them. */
+export type EditableField = PickableField | "title" | "price" | "description" | "location" | "photos";
 
 export type FieldOverrides = Partial<Record<EditableField, string>>;
 
@@ -18,7 +20,7 @@ export interface CheckRow {
   /** Set when the field has a value the person may edit. */
   editField?: EditableField;
   /** How the editor for a set field works. */
-  editor?: "options" | "text" | "textarea";
+  editor?: "options" | "text" | "textarea" | "photos";
 }
 
 function categoryRow(listing: Listing): CheckRow {
@@ -61,9 +63,15 @@ function photosRow(listing: Listing): CheckRow {
     if (listing.videoCount > 0) {
       value += ` · ${listing.videoCount} video to carry over (untested)`;
     }
-    return { label: "Photos", value, state: "ok" };
+    return { label: "Photos", value, state: "ok", editField: "photos", editor: "photos" };
   }
-  return { label: "Photos", value: "Not counted yet — the backend downloads all of them", state: "unknown" };
+  return {
+    label: "Photos",
+    value: "Not counted yet — the backend downloads all of them",
+    state: "unknown",
+    editField: "photos",
+    editor: "photos",
+  };
 }
 
 function deliveryRow(listing: Listing): CheckRow {
@@ -139,9 +147,21 @@ interface Props {
   onPick: (field: PickableField, value: string) => void;
   overrides: FieldOverrides;
   onOverride: (field: EditableField, value: string) => void;
+  photoTiles: PhotoTile[];
+  photosEdited: boolean;
+  onPhotoTilesChange: (tiles: PhotoTile[]) => void;
 }
 
-export default function CloneCheckList({ listing, picks, onPick, overrides, onOverride }: Props) {
+export default function CloneCheckList({
+  listing,
+  picks,
+  onPick,
+  overrides,
+  onOverride,
+  photoTiles,
+  photosEdited,
+  onPhotoTilesChange,
+}: Props) {
   const rows = buildCloneCheck(listing);
   const [editing, setEditing] = useState<EditableField | null>(null);
   const [draft, setDraft] = useState("");
@@ -192,6 +212,43 @@ export default function CloneCheckList({ listing, picks, onPick, overrides, onOv
         <span className="check-body">
           <span className="check-label">{row.label}</span>
           <span className="check-value">{pick} (your pick — saved for this listing)</span>
+        </span>
+      </li>
+    );
+  }
+
+  function renderPhotosRow(row: CheckRow) {
+    const isEditing = editing === "photos";
+    let value = row.value;
+    if (photosEdited) {
+      value = `${photoTiles.length} photo${photoTiles.length === 1 ? "" : "s"} selected for the clone`;
+      if (listing.videoCount > 0) {
+        value += ` · ${listing.videoCount} video to carry over (untested)`;
+      }
+    }
+    return (
+      <li key={row.label} className={`check-row check-${row.state}`}>
+        <span className="check-icon" aria-hidden="true">
+          {STATE_ICON[row.state]}
+        </span>
+        <span className="check-body">
+          <span className="check-label">
+            {row.label}
+            {photosEdited ? <span className="edited-tag">Edited</span> : null}
+          </span>
+          <span className="check-value">{value}</span>
+          {isEditing ? (
+            <PhotoEditor tiles={photoTiles} onChange={onPhotoTilesChange} />
+          ) : null}
+          {!isEditing ? (
+            <button type="button" className="edit-button" onClick={() => setEditing("photos")}>
+              Edit
+            </button>
+          ) : (
+            <button type="button" className="edit-button" onClick={() => setEditing(null)}>
+              Done
+            </button>
+          )}
         </span>
       </li>
     );
@@ -301,6 +358,9 @@ export default function CloneCheckList({ listing, picks, onPick, overrides, onOv
           }
           if (row.state === "missing" && pick) {
             return renderPickedRow(row, pick);
+          }
+          if (row.editField === "photos") {
+            return renderPhotosRow(row);
           }
           if (row.editField) {
             return renderSetRow(row);
