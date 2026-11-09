@@ -101,3 +101,14 @@ app rather than oversights:
    the API level.
 
 Everything else in the hardening merge stands as documented above.
+
+**Follow-up (2026-11-09, branch `feature/revision-delivery-edits`):**
+the preserved unfinished integration work has landed. Clone saves are
+now revision-bound (stale saves and stale job creation return 409 with
+the current revision; legacy records without a revision read as 0 and
+keep working), and delivery edits are structured (shipping + meetup
+options as explicit true / false / null, with unknown never coerced to
+false during job resolution). This closes the save/approval half of
+H6 and the structured-choice part of M5 as far as the offline code and
+tests can prove them; live Facebook verification remains a Sprint 4
+item, as before.

@@ -65,6 +65,13 @@ export interface DeliveryInfo {
   meetup: MeetupPrefs | null;
 }
 
+/** Structured user edits. Omitted keys keep recovered values; null is an
+ *  explicit unknown and must never silently fall back to recovery. */
+export interface DeliveryEdits {
+  shipping?: boolean | null;
+  meetup?: Partial<MeetupPrefs>;
+}
+
 export type VideoState = "none" | "recovered" | "present_not_downloaded" | "unknown";
 
 export interface PhotoRecovery {
@@ -129,6 +136,10 @@ export interface StoredClone {
   recovery: CloneRecovery | null;
   picks: ClonePicks;
   edits: CloneEdits;
+  /** Absent on legacy records until structured delivery choices are edited. */
+  deliveryEdits?: DeliveryEdits;
+  /** Monotonic persisted edit version; absent on legacy records (= 0). */
+  revision?: number;
   /** Photo file names the person kept for the clone, in order. Set only
    *  when they edited the photo selection; null = use all recovered. */
   photoSelection: string[] | null;

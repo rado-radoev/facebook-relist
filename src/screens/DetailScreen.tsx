@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import type { Listing, StoredClone } from "../types";
+import type { DeliveryEdits, Listing, MeetupPrefs, StoredClone } from "../types";
 import type { FieldPicks, PickableField } from "../lib/fieldOptions";
 import {
   ApiError,
@@ -17,6 +17,7 @@ import CloneCheckList, {
   unresolvedApprovalRows,
   type EditableField,
   type FieldOverrides,
+  type StructuredDeliveryChoice,
 } from "../components/CloneCheckList";
 
 interface Props {
@@ -62,6 +63,7 @@ function effectiveListing(
   picks: FieldPicks,
   overrides: FieldOverrides,
   photoTiles: PhotoTile[],
+  deliveryEdits: DeliveryEdits = {},
 ): Listing {
   const effective: Listing = { ...listing };
   if (picks.condition) {
@@ -98,6 +100,18 @@ function effectiveListing(
   }
   if (overrides.attributes) {
     effective.attributes = textToAttributes(overrides.attributes);
+  }
+  if (deliveryEdits.shipping !== undefined || deliveryEdits.meetup) {
+    const delivery = effective.deliveryInfo;
+    effective.deliveryInfo = {
+      type: delivery?.type ?? null,
+      shipping: deliveryEdits.shipping !== undefined ? deliveryEdits.shipping : delivery?.shipping ?? null,
+      meetup: {
+        public: deliveryEdits.meetup?.public !== undefined ? deliveryEdits.meetup.public : delivery?.meetup?.public ?? null,
+        doorPickup: deliveryEdits.meetup?.doorPickup !== undefined ? deliveryEdits.meetup.doorPickup : delivery?.meetup?.doorPickup ?? null,
+        doorDropoff: deliveryEdits.meetup?.doorDropoff !== undefined ? deliveryEdits.meetup.doorDropoff : delivery?.meetup?.doorDropoff ?? null,
+      },
+    };
   }
   effective.photoCount = photoTiles.length;
   const firstPhoto = photoTiles.find((tile) => tile.src);
@@ -172,6 +186,7 @@ export default function DetailScreen({ listing, facebookConnected, onBack, onRec
   const [overrides, setOverrides] = useState<FieldOverrides>(() =>
     synced ? {} : loadJson<FieldOverrides>(storageKey("edits", listing.listing_id), {}),
   );
+  const [deliveryEdits, setDeliveryEdits] = useState<DeliveryEdits>({});
   const [photoTiles, setPhotoTiles] = useState<PhotoTile[] | null>(null);
   const [persistReady, setPersistReady] = useState(!synced);
   const [savingState, setSavingState] = useState<"loading" | "idle" | "pending" | "saved" | "error">("loading");
@@ -181,21 +196,16 @@ export default function DetailScreen({ listing, facebookConnected, onBack, onRec
   const stateRef = useRef<{
     picks: FieldPicks;
     overrides: FieldOverrides;
+    deliveryEdits: DeliveryEdits;
     photoTiles: PhotoTile[] | null;
     clone: StoredClone | null;
-  }>({ picks, overrides, photoTiles, clone });
-  stateRef.current = { picks, overrides, photoTiles, clone };
+  }>({ picks, overrides, deliveryEdits, photoTiles, clone });
+  stateRef.current = { picks, overrides, deliveryEdits, photoTiles, clone };
 
   const displayListing = clone?.recovery ? applyClone(listing, clone) : listing;
   const originalTiles = serverTiles ?? initialPhotoTiles(displayListing);
   const activeTiles = photoTiles ?? originalTiles;
   const photosEdited = photoTiles !== null && tilesDiffer(photoTiles, originalTiles);
-  const savedPhotoFiles = clone?.recovery?.photos.files.filter((file): file is string => Boolean(file)) ?? [];
-  const displayedPhotoOrder = activeTiles
-    .filter((tile) => tile.origin === "original" && savedPhotoFiles.includes(tile.id))
-    .map((tile) => tile.id);
-  const canonicalSelectedOrder = savedPhotoFiles.filter((file) => displayedPhotoOrder.includes(file));
-  const photoOrderUnsupported = displayedPhotoOrder.some((file, index) => file !== canonicalSelectedOrder[index]);
 
   useEffect(() => {
     if (!synced) {
@@ -212,6 +222,7 @@ export default function DetailScreen({ listing, facebookConnected, onBack, onRec
           setClone(stored);
           setPicks(stored.picks as FieldPicks);
           setOverrides(stored.edits as FieldOverrides);
+          setDeliveryEdits(stored.deliveryEdits ?? {});
           if (stored.recovery) {
             const tiles = await buildServerTiles(stored);
             if (!cancelled) {
@@ -249,9 +260,12 @@ export default function DetailScreen({ listing, facebookConnected, onBack, onRec
       .then(() => saveClonePicks(listing.listing_id, {
         picks: snapshot.picks,
         edits: snapshot.overrides,
+        deliveryEdits: snapshot.deliveryEdits,
         photoSelection: selection,
+        revision: stateRef.current.clone?.revision ?? 0,
       }))
       .then((saved) => {
+        stateRef.current = { ...stateRef.current, clone: saved };
         if (version === saveVersion.current) {
           setClone(saved);
           setSavingState("saved");
@@ -271,7 +285,7 @@ export default function DetailScreen({ listing, facebookConnected, onBack, onRec
   useEffect(() => {
     if (synced && persistReady) queueSave();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [synced, persistReady, picks, overrides, photoTiles]);
+  }, [synced, persistReady, picks, overrides, deliveryEdits, photoTiles]);
 
   useEffect(() => {
     if (!synced) {
@@ -292,6 +306,7 @@ export default function DetailScreen({ listing, facebookConnected, onBack, onRec
     try {
       const stored = await recoverClone(listing.listing_id);
       setClone(stored);
+      setDeliveryEdits(stored.deliveryEdits ?? {});
       if (stored.recovery) {
         const tiles = await buildServerTiles(stored);
         setServerTiles(tiles);
@@ -315,7 +330,7 @@ export default function DetailScreen({ listing, facebookConnected, onBack, onRec
    * open it instead of failing. Seed listings keep the timer preview.
    */
   async function handleRecreate() {
-    const effective = effectiveListing(displayListing, picks, overrides, activeTiles);
+    const effective = effectiveListing(displayListing, picks, overrides, activeTiles, deliveryEdits);
     if (!synced) {
       onRecreate(effective);
       return;
@@ -323,7 +338,7 @@ export default function DetailScreen({ listing, facebookConnected, onBack, onRec
     setStartingJob(true);
     setJobError(null);
     try {
-      const job = await createJob(listing.listing_id);
+      const job = await createJob(listing.listing_id, stateRef.current.clone?.revision ?? 0);
       onRecreate(effective, job.id);
     } catch (error) {
       if (error instanceof ApiError && error.status === 409) {
@@ -351,18 +366,28 @@ export default function DetailScreen({ listing, facebookConnected, onBack, onRec
     setOverrides(next);
   }
 
+  function handleDeliveryChoice(field: StructuredDeliveryChoice, value: boolean | null) {
+    const current = stateRef.current.deliveryEdits;
+    const next: DeliveryEdits = field === "shipping"
+      ? { ...current, shipping: value }
+      : { ...current, meetup: { ...current.meetup, [field]: value } as Partial<MeetupPrefs> };
+    stateRef.current = { ...stateRef.current, deliveryEdits: next };
+    setDeliveryEdits(next);
+  }
+
   const hasRecovery = !synced || Boolean(clone?.recovery);
   const unanswered = hasRecovery
     ? missingFields(displayListing).filter((field) => !picks[field])
     : [];
   const noPhotos = hasRecovery && activeTiles.length === 0;
+  const approvalListing = effectiveListing(displayListing, picks, overrides, activeTiles, deliveryEdits);
   const unresolvedApproval = synced
-    ? unresolvedApprovalRows(effectiveListing(displayListing, picks, overrides, activeTiles), picks, overrides)
+    ? unresolvedApprovalRows(approvalListing, picks, overrides)
     : [];
   const videoUnavailable = Boolean(displayListing.videoCount > 0 && displayListing.videoState !== "recovered");
   const unreadablePhotos = activeTiles.some((tile) => tile.src === null);
   const saveReady = !synced || savingState === "saved";
-  const recreateBlocked = !hasRecovery || !cloneLoaded || unanswered.length > 0 || noPhotos || unreadablePhotos || unresolvedApproval.length > 0 || videoUnavailable || !saveReady || photoOrderUnsupported;
+  const recreateBlocked = !hasRecovery || !cloneLoaded || unanswered.length > 0 || noPhotos || unreadablePhotos || unresolvedApproval.length > 0 || videoUnavailable || !saveReady;
 
   return (
     <div className="screen">
@@ -401,11 +426,12 @@ export default function DetailScreen({ listing, facebookConnected, onBack, onRec
         </section>
       ) : (
         <CloneCheckList
-          listing={displayListing}
+          listing={approvalListing}
           picks={picks}
           onPick={handlePick}
           overrides={overrides}
           onOverride={handleOverride}
+          onDeliveryChoice={handleDeliveryChoice}
           photoTiles={activeTiles}
           photosEdited={photosEdited}
           onPhotoTilesChange={setPhotoTiles}
@@ -431,9 +457,7 @@ export default function DetailScreen({ listing, facebookConnected, onBack, onRec
       {unreadablePhotos ? (
         <p className="blocked-note">At least one archived photo is missing or unreadable. Retry the clone check before recreating; unreadable media cannot be approved.</p>
       ) : null}
-      {photoOrderUnsupported ? (
-        <p role="alert" className="blocked-note">This backend saves your selected photo order, but its recreate job currently uploads those photos in archive order. Recreating is blocked until the backend job uses the saved order.</p>
-      ) : null}
+
       {synced && savingState === "pending" ? (
         <p role="status" className="blocked-note">Saving your picks and edits… Recreate is unavailable until the server confirms.</p>
       ) : null}

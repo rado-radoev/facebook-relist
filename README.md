@@ -128,6 +128,22 @@ browser session; identity still comes only from the app session):
   and the recovered-vs-missing checklist (pickers for missing fields,
   Edit for everything set) is fed by the recovery, with picks/edits
   saved to the backend instead of localStorage.
+- **Revision-bound saves + structured delivery edits** — every clone
+  record carries a monotonic `revision`. A picks/edits save sends the
+  revision the screen loaded; if the stored clone has moved on, the
+  save is refused with **409** ("changed since it was loaded; reload
+  before saving or recreating") instead of silently overwriting, and
+  the screen keeps its local state visible. Starting a recreate job
+  sends the same revision and gets the same 409 treatment when it is
+  stale — a job is never built from clone data the person did not
+  approve. Saves without a revision (legacy clients) are still
+  accepted. Records written before revision tracking load unchanged:
+  a missing revision reads as 0. Delivery choices are structured end
+  to end: shipping and each meetup option (public / door pickup / door
+  dropoff) can be set to an explicit yes or no in the clone preview,
+  an unanswered option stays **unknown** (never collapsed to "no"),
+  and job resolution refuses to recreate while any of them is still
+  unknown.
 - **Read-only against Facebook** — sync and recovery open pages and read
   them; the only click anywhere is the edit wizard's "Next". No listing
   is created, edited, or deleted in this sprint (that's Sprint 3).

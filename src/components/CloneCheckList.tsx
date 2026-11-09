@@ -18,6 +18,7 @@ export type EditableField =
   | "attributes";
 
 export type FieldOverrides = Partial<Record<EditableField, string>>;
+export type StructuredDeliveryChoice = "shipping" | "public" | "doorPickup" | "doorDropoff";
 
 export interface CheckRow {
   label: string;
@@ -29,6 +30,7 @@ export interface CheckRow {
   editField?: EditableField;
   /** How the editor for a set field works. */
   editor?: "options" | "text" | "textarea" | "photos";
+  deliveryChoice?: StructuredDeliveryChoice;
 }
 
 function missingReason(listing: Listing, field: keyof NonNullable<Listing["recoveryReasons"]>): string {
@@ -143,6 +145,7 @@ function deliveryRows(listing: Listing): CheckRow[] {
       label: "Shipping",
       value: shippingKnown ? (details?.shipping ? "Offered" : "Not offered") : listing.recoveryReasons?.delivery ?? "Shipping status was not returned by the backend.",
       state: shippingKnown ? "ok" : "unknown",
+      deliveryChoice: "shipping",
     },
   ];
   const meetupOptions = [
@@ -157,12 +160,13 @@ function deliveryRows(listing: Listing): CheckRow[] {
         ? `Unknown — ${listing.recoveryReasons?.delivery ?? "this meetup option was not observed by the backend."}`
         : value ? "Selected" : "Not selected",
       state: value === null || value === undefined ? "unknown" : "ok",
+      deliveryChoice: label === "Public meetup" ? "public" : label === "Door pickup" ? "doorPickup" : "doorDropoff",
     });
   }
   if (!shippingKnown || meetupOptions.some(([, value]) => value === null || value === undefined)) {
     rows.push({
       label: "Delivery editing",
-      value: "Shipping and meetup choices cannot be edited or saved by the current backend contract; recreating with these subfields unknown is blocked.",
+      value: "Some shipping or meetup options are still unknown. Pick Yes or No for each one above; recreating is blocked until each one is set.",
       state: "missing",
     });
   }
@@ -321,6 +325,7 @@ interface Props {
   onPick: (field: PickableField, value: string) => void;
   overrides: FieldOverrides;
   onOverride: (field: EditableField, value: string) => void;
+  onDeliveryChoice: (field: StructuredDeliveryChoice, value: boolean) => void;
   photoTiles: PhotoTile[];
   photosEdited: boolean;
   onPhotoTilesChange: (tiles: PhotoTile[]) => void;
@@ -335,6 +340,7 @@ export default function CloneCheckList({
   onPick,
   overrides,
   onOverride,
+  onDeliveryChoice,
   photoTiles,
   photosEdited,
   onPhotoTilesChange,
@@ -345,6 +351,7 @@ export default function CloneCheckList({
   const rows = buildCloneCheck(listing);
   const [editing, setEditing] = useState<EditableField | null>(null);
   const [draft, setDraft] = useState("");
+  const [editingDelivery, setEditingDelivery] = useState<StructuredDeliveryChoice | null>(null);
 
   function startEdit(row: CheckRow) {
     if (!row.editField) {
@@ -454,6 +461,29 @@ export default function CloneCheckList({
     );
   }
 
+  function renderDeliveryRow(row: CheckRow) {
+    const field = row.deliveryChoice as StructuredDeliveryChoice;
+    const isEditing = editingDelivery === field;
+    return (
+      <li key={row.label} className={`check-row check-${row.state}`}>
+        <span className="check-icon" aria-hidden="true">{STATE_ICON[row.state]}</span>
+        <span className="check-body">
+          <span className="check-label">{row.label}</span>
+          <span className="check-value">{row.value}</span>
+          {isEditing ? (
+            <span className="check-picker" role="group" aria-label={`Edit ${row.label}`}>
+              <button type="button" className="check-chip" onClick={() => { onDeliveryChoice(field, true); setEditingDelivery(null); }}>Yes</button>
+              <button type="button" className="check-chip" onClick={() => { onDeliveryChoice(field, false); setEditingDelivery(null); }}>No</button>
+              <button type="button" className="check-chip check-chip-cancel" onClick={() => setEditingDelivery(null)}>Cancel</button>
+            </span>
+          ) : (
+            <button type="button" className="edit-button" onClick={() => setEditingDelivery(field)}>Edit</button>
+          )}
+        </span>
+      </li>
+    );
+  }
+
   function renderSetRow(row: CheckRow) {
     const editField = row.editField as EditableField;
     const override = overrides[editField];
@@ -558,6 +588,9 @@ export default function CloneCheckList({
           }
           if ((row.state === "missing" || row.state === "unknown") && row.field && pick) {
             return renderPickedRow(row, pick);
+          }
+          if (row.deliveryChoice) {
+            return renderDeliveryRow(row);
           }
           if (row.editField === "photos") {
             return renderPhotosRow(row);

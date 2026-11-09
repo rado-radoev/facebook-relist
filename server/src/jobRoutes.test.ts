@@ -302,6 +302,122 @@ describe("recreate job API", () => {
     expect(second.json().job.id).toBe(first.json().job.id);
   });
 
+  it("rejects job creation against a stale acknowledged clone revision", async () => {
+    const cookie = await registerUser("Person F", "f-jobs@example.com");
+    const userId = await seedConnectedUser(cookie);
+    const result = await parts.app.inject({
+      method: "POST",
+      url: `/api/listings/${OLD_ID}/jobs`,
+      headers: { cookie, origin: "http://localhost:5173" },
+      payload: { revision: 99 },
+    });
+    if (result.statusCode === 201) {
+      await parts.jobs.processJob(userId, result.json().job.id as string);
+    }
+    expect(result.statusCode).toBe(409);
+    expect(result.json().error).toMatch(/clone check changed/i);
+  });
+
+  it("binds saved media order and structured delivery choices to the created job", async () => {
+    const cookie = await registerUser("Person E", "e-jobs@example.com");
+    const userId = await seedConnectedUser(cookie);
+    const archiveDir = path.join(dataDir, "archive", userId, OLD_ID);
+    await writeFile(path.join(archiveDir, "photo-2.jpg"), "second generated fake image bytes");
+    const clone = completeClone();
+    clone.recovery!.photos = Object.assign({
+      urls: ["https://cdn.example/a/photo-1.jpg", "https://cdn.example/a/photo-2.jpg"],
+      files: ["photo-1.jpg", "photo-2.jpg"],
+      downloaded: 2,
+    }, { complete: true, expectedCount: 2, identities: ["media-1", "media-2"], reasons: [null, null] });
+    await parts.store.saveClone(userId, OLD_ID, clone);
+
+    const save = await parts.app.inject({
+      method: "PUT",
+      url: `/api/listings/${OLD_ID}/clone/picks`,
+      headers: { cookie, origin: "http://localhost:5173" },
+      payload: {
+        picks: {},
+        edits: {},
+        photoSelection: ["photo-2.jpg", "photo-1.jpg"],
+        deliveryEdits: { shipping: true, meetup: { public: true, doorPickup: false, doorDropoff: true } },
+      },
+    });
+    expect(save.statusCode).toBe(200);
+    expect(save.json().clone.deliveryEdits).toEqual({
+      shipping: true,
+      meetup: { public: true, doorPickup: false, doorDropoff: true },
+    });
+
+    const create = await parts.app.inject({
+      method: "POST",
+      url: `/api/listings/${OLD_ID}/jobs`,
+      headers: { cookie, origin: "http://localhost:5173" },
+    });
+    expect(create.statusCode).toBe(201);
+    expect(create.json().job.data.photoFiles).toEqual(["photo-2.jpg", "photo-1.jpg"]);
+    expect(create.json().job.data.delivery).toEqual({
+      type: "Local pickup only",
+      shipping: true,
+      meetup: { public: true, doorPickup: false, doorDropoff: true },
+    });
+    await parts.jobs.processJob(userId, create.json().job.id as string);
+  });
+
+  it("creates a job when the acknowledged clone revision is current", async () => {
+    const cookie = await registerUser("Person G", "g-jobs@example.com");
+    const userId = await seedConnectedUser(cookie);
+    const currentRevision = parts.store.getClone(userId, OLD_ID)?.revision ?? 0;
+
+    const create = await parts.app.inject({
+      method: "POST",
+      url: `/api/listings/${OLD_ID}/jobs`,
+      headers: { cookie, origin: "http://localhost:5173" },
+      payload: { revision: currentRevision },
+    });
+    expect(create.statusCode).toBe(201);
+    expect(create.json().job.listingId).toBe(OLD_ID);
+    await parts.jobs.processJob(userId, create.json().job.id as string);
+  });
+
+  it("persists an explicit no-shipping choice as false through save and job creation", async () => {
+    const cookie = await registerUser("Person H", "h-jobs@example.com");
+    const userId = await seedConnectedUser(cookie);
+    // Recovery reported shipping as offered; the owner explicitly turns it off.
+    const clone = completeClone();
+    clone.recovery!.delivery = recovered(
+      { type: "Local pickup only", shipping: true, meetup: { public: true, doorPickup: true, doorDropoff: true } },
+      "edit_form",
+    );
+    await parts.store.saveClone(userId, OLD_ID, clone);
+
+    const save = await parts.app.inject({
+      method: "PUT",
+      url: `/api/listings/${OLD_ID}/clone/picks`,
+      headers: { cookie, origin: "http://localhost:5173" },
+      payload: {
+        picks: {},
+        edits: {},
+        photoSelection: null,
+        deliveryEdits: { shipping: false, meetup: { public: false, doorPickup: false, doorDropoff: false } },
+      },
+    });
+    expect(save.statusCode).toBe(200);
+    expect(save.json().clone.deliveryEdits.shipping).toBe(false);
+
+    const create = await parts.app.inject({
+      method: "POST",
+      url: `/api/listings/${OLD_ID}/jobs`,
+      headers: { cookie, origin: "http://localhost:5173" },
+    });
+    expect(create.statusCode).toBe(201);
+    expect(create.json().job.data.delivery).toEqual({
+      type: "Local pickup only",
+      shipping: false,
+      meetup: { public: false, doorPickup: false, doorDropoff: false },
+    });
+    await parts.jobs.processJob(userId, create.json().job.id as string);
+  });
+
   it("returns 400 with the missing fields when the clone check is incomplete", async () => {
     cookieB = await registerUser("Person B", "b-jobs@example.com");
     const userBId = await seedConnectedUser(cookieB);

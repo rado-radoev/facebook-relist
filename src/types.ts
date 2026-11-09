@@ -96,6 +96,11 @@ export interface DeliveryInfo {
   meetup: { public: boolean | null; doorPickup: boolean | null; doorDropoff: boolean | null } | null;
 }
 
+export interface DeliveryEdits {
+  shipping?: boolean | null;
+  meetup?: Partial<MeetupPrefs>;
+}
+
 export interface PhotoRecovery {
   urls: string[];
   files: Array<string | null>;
@@ -142,6 +147,8 @@ export interface StoredClone {
   recovery: CloneRecovery | null;
   picks: ClonePicks;
   edits: CloneEdits;
+  deliveryEdits?: DeliveryEdits;
+  revision?: number;
   photoSelection: string[] | null;
   updatedAt: string;
 }

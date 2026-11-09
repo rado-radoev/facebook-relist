@@ -48,7 +48,27 @@ export function applyClone(listing: Listing, clone: StoredClone): Listing {
   merged.locationLabel = recovery.location.value ?? "";
   merged.deliveryInfo = recovery.delivery.value;
   merged.delivery = recovery.delivery.value?.type ?? null;
-  const delivery = recovery.delivery.value;
+  const structuredEdits = clone.deliveryEdits ?? {};
+  const delivery = recovery.delivery.value || structuredEdits.shipping !== undefined || structuredEdits.meetup
+    ? {
+        type: recovery.delivery.value?.type ?? null,
+        shipping: structuredEdits.shipping !== undefined
+          ? structuredEdits.shipping
+          : recovery.delivery.value?.shipping ?? null,
+        meetup: {
+          public: structuredEdits.meetup?.public !== undefined
+            ? structuredEdits.meetup.public
+            : recovery.delivery.value?.meetup?.public ?? null,
+          doorPickup: structuredEdits.meetup?.doorPickup !== undefined
+            ? structuredEdits.meetup.doorPickup
+            : recovery.delivery.value?.meetup?.doorPickup ?? null,
+          doorDropoff: structuredEdits.meetup?.doorDropoff !== undefined
+            ? structuredEdits.meetup.doorDropoff
+            : recovery.delivery.value?.meetup?.doorDropoff ?? null,
+        },
+      }
+    : null;
+  merged.deliveryInfo = delivery;
   if (delivery) {
     if (delivery.shipping !== null) {
       merged.shipping = delivery.shipping ? "Offered" : "Not offered";
