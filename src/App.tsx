@@ -4,7 +4,6 @@ import {
   disconnectFacebook,
   fetchFacebookStatus,
   fetchMe,
-  logout,
   type ApiUser,
 } from "./lib/api";
 import { initialsOf } from "./lib/user";
@@ -26,8 +25,6 @@ export default function App() {
   const [facebookStatus, setFacebookStatus] = useState<SessionStatus>("not_connected");
   const [tab, setTab] = useState<TabId>("listings");
   const [view, setView] = useState<View>({ kind: "tabs" });
-  const [signOutError, setSignOutError] = useState<string | null>(null);
-  const [signingOut, setSigningOut] = useState(false);
 
   const refreshFacebookStatus = useCallback(async () => {
     try {
@@ -54,22 +51,6 @@ export default function App() {
   const handleStatusChange = useCallback((status: SessionStatus) => {
     setFacebookStatus(status);
   }, []);
-
-  async function handleSignOut() {
-    setSigningOut(true);
-    setSignOutError(null);
-    try {
-      await logout();
-      setFacebookStatus("not_connected");
-      setView({ kind: "tabs" });
-      setTab("listings");
-      setAuth({ kind: "signedOut" });
-    } catch (error) {
-      setSignOutError(error instanceof Error ? error.message : "Could not sign out. Try again.");
-    } finally {
-      setSigningOut(false);
-    }
-  }
 
   async function handleDisconnect() {
     try {
@@ -132,7 +113,6 @@ export default function App() {
         </header>
         <main className="app-main">
           <AuthScreen onSignedIn={handleSignedIn} />
-          {signOutError ? <p role="alert" className="alert-note">Could not sign out: {signOutError}</p> : null}
         </main>
       </div>
     );
@@ -197,21 +177,7 @@ export default function App() {
         <span className="preview-badge">Sprint 3</span>
       </header>
 
-      <main className="app-main">
-        {body}
-        <div className="session-actions">
-          {signOutError ? <p role="alert" className="alert-note">Could not sign out: {signOutError}</p> : null}
-          <button
-            type="button"
-            className="edit-button"
-            aria-label="Sign out of Relist"
-            disabled={signingOut}
-            onClick={() => void handleSignOut()}
-          >
-            {signingOut ? "Signing out…" : "Sign out of Relist"}
-          </button>
-        </div>
-      </main>
+      <main className="app-main">{body}</main>
 
       {showTabs ? <TabBar active={tab} onChange={setTab} /> : null}
     </div>

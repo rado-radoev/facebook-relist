@@ -774,7 +774,7 @@ describe("dry-run jobs", () => {
   });
 });
 
-describe("production Facebook driver mutation gate", () => {
+describe("production Facebook driver dry-run gate", () => {
   it("does not trust non-empty selling cards without positive surface and completion evidence", async () => {
     const browser = {
       ensureSession: async () => undefined,
@@ -825,7 +825,38 @@ describe("production Facebook driver mutation gate", () => {
     expect(result).toMatchObject({ kind: "unknown" });
   });
 
-  it("refuses a requested live create before touching the browser", async () => {
+  it("never touches the browser for a dry-run create", async () => {
+    let touched = false;
+    const browser = {
+      ensureSession: async () => { touched = true; },
+      refreshStatus: async () => { touched = true; return "connected"; },
+      collectSnapshotAt: async () => { touched = true; return null; },
+    } as unknown as BrowserManager;
+    const driver = new FacebookDriver(browser);
+    const outcome = await driver.createListing(
+      USER,
+      {
+        title: "Widget",
+        price: "$30",
+        description: "A fine widget.",
+        category: "Toys & Games",
+        condition: "New",
+        attributes: {},
+        location: "San Diego, CA",
+        delivery: { type: "Local pickup only", shipping: false, meetup: { public: false, doorPickup: false, doorDropoff: false } },
+        photoFiles: ["photo-1.jpg"],
+        photoUrls: ["https://cdn.example/a/photo-1.jpg"],
+        videoFile: null,
+      },
+      [],
+      null,
+      { dryRun: true },
+    );
+    expect(outcome.kind).toBe("dry_run");
+    expect(touched).toBe(false);
+  });
+
+  it("proceeds to the browser for a live create — the per-job dry-run flag is the only gate", async () => {
     let touched = false;
     const browser = {
       ensureSession: async () => { touched = true; },
@@ -852,11 +883,14 @@ describe("production Facebook driver mutation gate", () => {
       null,
       { dryRun: false },
     );
-    expect(outcome.kind).toBe("blocked");
-    expect(touched).toBe(false);
+    // The fake browser yields no create page, so the attempt stops as
+    // "unknown" — the point is it REACHED the browser. Only the job's
+    // dryRun flag (from the owner's RELIST_DRY_RUN switch) gates writes.
+    expect(outcome.kind).toBe("unknown");
+    expect(touched).toBe(true);
   });
 
-  it("never opens a destructive delete path, including in dry run", async () => {
+  it("opens the delete path only when dry-run is off", async () => {
     let touched = false;
     const browser = {
       ensureSession: async () => { touched = true; },
@@ -865,9 +899,10 @@ describe("production Facebook driver mutation gate", () => {
     } as unknown as BrowserManager;
     const driver = new FacebookDriver(browser);
     const dryRun = await driver.deleteListing(USER, OLD_ID, { dryRun: true });
-    const live = await driver.deleteListing(USER, OLD_ID, { dryRun: false });
     expect(dryRun.kind).toBe("dry_run");
-    expect(live.kind).toBe("not_deleted");
     expect(touched).toBe(false);
+    const live = await driver.deleteListing(USER, OLD_ID, { dryRun: false });
+    expect(live.kind).toBe("not_deleted");
+    expect(touched).toBe(true);
   });
 });
