@@ -333,6 +333,41 @@ phone test works) — do not expose them beyond the home network: no
 port forwarding, no public URL. Relist's own sign-in is the only gate
 in front of them.
 
+## Run it in Docker (home server)
+
+The whole app as two containers: the backend (with Playwright's
+Chromium inside it — the phone never runs Playwright; it only shows the
+live view) and the web frontend.
+
+```sh
+cp .env.example .env
+# Edit .env: set CORS_ORIGIN to the exact address you will open on the
+# phone, e.g. CORS_ORIGIN=http://192.168.1.20:5173 with your Docker
+# host's LAN IP. It must match exactly, or sign-in is blocked.
+docker compose up -d --build
+```
+
+Then open `http://<docker-host-LAN-IP>:5173` on the phone and sign in.
+The app calls the backend on the same host at port 8787, which compose
+publishes alongside 5173 — both ports must stay reachable on the home
+network.
+
+**Data:** everything that matters — accounts, Facebook browser
+profiles, downloaded photos — lives in the named Docker volume
+`relist-data`, mounted at `/data` in the backend container, so it
+survives rebuilds and restarts. Back it up with
+`docker run --rm -v relist-data:/data -v "$PWD":/backup alpine tar czf /backup/relist-data.tgz -C /data .`
+(stop the backend first for a clean copy).
+
+**Dry-run is still the default** in Docker too: recreates post and
+delete nothing real until `RELIST_DRY_RUN=0` is set in `.env` for a
+supervised live run.
+
+**Home network only.** Do not port-forward these ports, put them on a
+public URL, or otherwise expose them beyond the home network — the app
+has no gate beyond its own sign-in, and whoever can reach it can drive
+a signed-in Facebook session.
+
 ## Household accounts — one signed-in person per device
 
 The Relist backend can serve a whole household, but **there is no account
