@@ -12,6 +12,12 @@
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import path from "node:path";
+import type {
+  CloneEdits,
+  ClonePicks,
+  StoredClone,
+  SyncedListing,
+} from "./cloneTypes.js";
 import type { FacebookStatus } from "./facebookStatus.js";
 import { SESSION_TTL_MS } from "./config.js";
 
@@ -35,6 +41,16 @@ export interface SessionRecord {
 interface StoreData {
   users: UserRecord[];
   sessions: SessionRecord[];
+  /** Sprint 2: each user's synced listings, keyed by user id. A user id
+   *  only ever appears here from that user's own session work — reads
+   *  always go through the caller's own id. */
+  listings: Record<string, SyncedListing[]>;
+  /** Sprint 2: clone recoveries + saved picks/edits, per user per listing. */
+  clones: Record<string, Record<string, StoredClone>>;
+}
+
+function emptyData(): StoreData {
+  return { users: [], sessions: [], listings: {}, clones: {} };
 }
 
 export function hashToken(token: string): string {
@@ -47,7 +63,7 @@ export function profileDirFor(dataDir: string, userId: string): string {
 
 export class Store {
   private readonly filePath: string;
-  private data: StoreData = { users: [], sessions: [] };
+  private data: StoreData = emptyData();
   private loaded = false;
 
   constructor(private readonly dataDir: string) {
@@ -58,9 +74,11 @@ export class Store {
     await mkdir(this.dataDir, { recursive: true });
     try {
       const raw = await readFile(this.filePath, "utf8");
-      this.data = JSON.parse(raw) as StoreData;
+      const parsed = JSON.parse(raw) as Partial<StoreData>;
+      // Tolerate data files written before Sprint 2 (no listings/clones).
+      this.data = { ...emptyData(), ...parsed };
     } catch {
-      this.data = { users: [], sessions: [] };
+      this.data = emptyData();
     }
     this.loaded = true;
   }
@@ -153,5 +171,54 @@ export class Store {
     const tokenHash = hashToken(token);
     this.data.sessions = this.data.sessions.filter((session) => session.tokenHash !== tokenHash);
     await this.save();
+  }
+
+  // -- Sprint 2: synced listings + clone records (all per-user) -----------
+
+  getListings(userId: string): SyncedListing[] {
+    this.ensureLoaded();
+    return this.data.listings[userId] ?? [];
+  }
+
+  async setListings(userId: string, listings: SyncedListing[]): Promise<void> {
+    this.ensureLoaded();
+    this.data.listings[userId] = listings;
+    await this.save();
+  }
+
+  getClone(userId: string, listingId: string): StoredClone | undefined {
+    this.ensureLoaded();
+    return this.data.clones[userId]?.[listingId];
+  }
+
+  async saveClone(userId: string, listingId: string, record: StoredClone): Promise<void> {
+    this.ensureLoaded();
+    const perUser = this.data.clones[userId] ?? {};
+    perUser[listingId] = record;
+    this.data.clones[userId] = perUser;
+    await this.save();
+  }
+
+  /** Save the person's picks/edits for one listing, creating the record
+   *  (with no recovery yet) when this is the first save. */
+  async saveClonePicks(
+    userId: string,
+    listingId: string,
+    input: { picks: ClonePicks; edits: CloneEdits; photoSelection: string[] | null },
+  ): Promise<StoredClone> {
+    this.ensureLoaded();
+    const existing = this.getClone(userId, listingId);
+    const record: StoredClone = {
+      recovery: existing ? existing.recovery : null,
+      picks: input.picks,
+      edits: input.edits,
+      photoSelection: input.photoSelection,
+      updatedAt: new Date().toISOString(),
+    };
+    const perUser = this.data.clones[userId] ?? {};
+    perUser[listingId] = record;
+    this.data.clones[userId] = perUser;
+    await this.save();
+    return record;
   }
 }

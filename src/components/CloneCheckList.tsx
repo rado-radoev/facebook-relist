@@ -1,13 +1,21 @@
 import { useState } from "react";
 import type { Listing } from "../types";
 import { FIELD_OPTIONS, type FieldPicks, type PickableField } from "../lib/fieldOptions";
+import { attributesToText } from "../lib/cloneMapping";
 import type { PhotoTile } from "../lib/photos";
 import PhotoEditor from "./PhotoEditor";
 
 export type CheckState = "ok" | "warn" | "unknown" | "missing";
 
 /** Fields the person can edit in the clone preview — all of them. */
-export type EditableField = PickableField | "title" | "price" | "description" | "location" | "photos";
+export type EditableField =
+  | PickableField
+  | "title"
+  | "price"
+  | "description"
+  | "location"
+  | "photos"
+  | "attributes";
 
 export type FieldOverrides = Partial<Record<EditableField, string>>;
 
@@ -57,12 +65,24 @@ function conditionRow(listing: Listing): CheckRow {
   return { label: "Condition", value: listing.condition, state: "ok", editField: "condition", editor: "options" };
 }
 
+function videoSuffix(listing: Listing): string {
+  if (listing.videoCount === 0) {
+    return "";
+  }
+  if (listing.videoState === "recovered") {
+    return ` · ${listing.videoCount} video downloaded to the archive`;
+  }
+  if (listing.videoState === "present_not_downloaded") {
+    return ` · ${listing.videoCount} video present — could not be downloaded`;
+  }
+  return ` · ${listing.videoCount} video to carry over (untested)`;
+}
+
 function photosRow(listing: Listing): CheckRow {
   if (listing.photoCount !== null) {
-    let value = `${listing.photoCount} of ${listing.photoCount} downloaded`;
-    if (listing.videoCount > 0) {
-      value += ` · ${listing.videoCount} video to carry over (untested)`;
-    }
+    const downloaded = listing.photosDownloaded ?? listing.photoCount;
+    let value = `${downloaded} of ${listing.photoCount} downloaded`;
+    value += videoSuffix(listing);
     return { label: "Photos", value, state: "ok", editField: "photos", editor: "photos" };
   }
   return {
@@ -95,11 +115,37 @@ function deliveryRow(listing: Listing): CheckRow {
   if (listing.shipping) {
     value += ` · Shipping: ${listing.shipping}`;
   }
+  if (listing.meetup) {
+    const chosen: string[] = [];
+    if (listing.meetup.public) {
+      chosen.push("Public meetup");
+    }
+    if (listing.meetup.doorPickup) {
+      chosen.push("Door pickup");
+    }
+    if (listing.meetup.doorDropoff) {
+      chosen.push("Door dropoff");
+    }
+    value += chosen.length > 0 ? ` · Meetup: ${chosen.join(", ")}` : " · No meetup options set";
+  }
   return { label: "Delivery", value, state: "ok", editField: "delivery", editor: "options" };
 }
 
+function attributesRow(listing: Listing): CheckRow | null {
+  if (!listing.attributes || Object.keys(listing.attributes).length === 0) {
+    return null;
+  }
+  return {
+    label: "Attributes",
+    value: attributesToText(listing.attributes),
+    state: "ok",
+    editField: "attributes",
+    editor: "textarea",
+  };
+}
+
 export function buildCloneCheck(listing: Listing): CheckRow[] {
-  return [
+  const rows: CheckRow[] = [
     {
       label: "Title",
       value: listing.title.replace(/\s+/g, " ").trim(),
@@ -121,6 +167,11 @@ export function buildCloneCheck(listing: Listing): CheckRow[] {
     { label: "Location", value: listing.locationLabel, state: "ok", editField: "location", editor: "text" },
     deliveryRow(listing),
   ];
+  const attributes = attributesRow(listing);
+  if (attributes) {
+    rows.push(attributes);
+  }
+  return rows;
 }
 
 /** Fields the person still has to supply before this listing can recreate. */
@@ -222,9 +273,7 @@ export default function CloneCheckList({
     let value = row.value;
     if (photosEdited) {
       value = `${photoTiles.length} photo${photoTiles.length === 1 ? "" : "s"} selected for the clone`;
-      if (listing.videoCount > 0) {
-        value += ` · ${listing.videoCount} video to carry over (untested)`;
-      }
+      value += videoSuffix(listing);
     }
     return (
       <li key={row.label} className={`check-row check-${row.state}`}>

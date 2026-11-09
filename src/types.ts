@@ -44,6 +44,84 @@ export interface Listing {
   meetup?: MeetupPrefs;
   attributes?: Record<string, string>;
   locationLabel: string;
+  /** Sprint 2: where this listing came from. "synced" = the backend read
+   *  it from the person's own Facebook selling list; seed otherwise. */
+  source?: "seed" | "synced";
+  /** Sprint 2: how many of the recovered photos actually downloaded. */
+  photosDownloaded?: number;
+  /** Sprint 2: state of the listing's video in the backend archive. */
+  videoState?: "none" | "recovered" | "present_not_downloaded";
+}
+
+// ---------------------------------------------------------------------------
+// Sprint 2 backend DTOs (mirror server/src/cloneTypes.ts)
+
+export interface SyncedListing {
+  id: string;
+  title: string;
+  price: string;
+  status: string;
+  statusText: string;
+  photoUrl: string;
+  url: string;
+  listedDate: string | null;
+  syncedAt: string;
+}
+
+export type FieldSource = "edit_form" | "listing_details";
+
+export interface FieldResult<T> {
+  value: T | null;
+  source: FieldSource | null;
+  reason: string | null;
+}
+
+export interface DeliveryInfo {
+  type: string | null;
+  shipping: boolean | null;
+  meetup: MeetupPrefs | null;
+}
+
+export interface CloneRecovery {
+  listingId: string;
+  recoveredAt: string;
+  title: FieldResult<string>;
+  price: FieldResult<string>;
+  description: FieldResult<string>;
+  category: FieldResult<string>;
+  condition: FieldResult<string>;
+  attributes: FieldResult<Record<string, string>>;
+  location: FieldResult<string>;
+  delivery: FieldResult<DeliveryInfo>;
+  photos: {
+    urls: string[];
+    files: Array<string | null>;
+    downloaded: number;
+  };
+  video: {
+    present: boolean;
+    state: "none" | "recovered" | "present_not_downloaded";
+    file: string | null;
+    reason: string | null;
+  };
+  step2Blocked: boolean;
+}
+
+export type ClonePicks = Partial<Record<"condition" | "category" | "delivery", string>>;
+
+export type CloneEdits = Partial<
+  Record<
+    "title" | "price" | "description" | "category" | "condition" | "delivery" | "location" | "attributes",
+    string
+  >
+>;
+
+export interface StoredClone {
+  recovery: CloneRecovery | null;
+  picks: ClonePicks;
+  edits: CloneEdits;
+  photoSelection: string[] | null;
+  updatedAt: string;
 }
 
 export type TabId = "listings" | "history";
