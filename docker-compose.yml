@@ -1,0 +1,46 @@
+# Relist — home Docker deployment.
+#
+#   cp .env.example .env   # set CORS_ORIGIN to the address you open on the phone
+#   docker compose up -d --build
+#
+# Then open http://<docker-host-LAN-IP>:5173 on the phone.
+# HOME NETWORK ONLY: do not port-forward or otherwise expose these ports
+# beyond the home network — Relist's own sign-in is the only gate.
+
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile.backend
+    environment:
+      # Must equal the exact origin the phone loads the app from
+      # (scheme + host + port), or the browser will block sign-in.
+      CORS_ORIGIN: ${CORS_ORIGIN:-http://localhost:5173}
+      # Safety switch: unset or "1" = dry-run (nothing posts or deletes
+      # on Facebook). Set RELIST_DRY_RUN=0 in .env ONLY for a supervised
+      # live run.
+      RELIST_DRY_RUN: ${RELIST_DRY_RUN:-1}
+      DATA_DIR: /data
+      PORT: "8787"
+    volumes:
+      # Accounts, Facebook browser profiles, and photo archives.
+      # Survives container rebuilds and restarts.
+      - relist-data:/data
+    ports:
+      - "8787:8787"
+    # Chromium needs a real shared-memory segment or it crashes under load.
+    shm_size: "1gb"
+    restart: unless-stopped
+
+  web:
+    build:
+      context: .
+      dockerfile: Dockerfile.web
+    ports:
+      - "5173:80"
+    depends_on:
+      - backend
+    restart: unless-stopped
+
+volumes:
+  relist-data:

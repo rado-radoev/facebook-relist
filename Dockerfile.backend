@@ -1,0 +1,30 @@
+# Relist backend — Fastify + Playwright Chromium.
+#
+# Base image: the official Playwright image at the EXACT version the app
+# depends on (playwright ^1.64.1 in server/package.json). It ships the
+# matching Chromium build and all of Chromium's Linux libraries, so the
+# backend browser works with no extra install step. Do not bump this tag
+# without bumping the playwright dependency to match.
+FROM mcr.microsoft.com/playwright:v1.64.1-noble
+
+WORKDIR /app/server
+
+# Dependencies first (layer cache). Full `npm ci` on purpose: the
+# production start script runs through tsx, which lives in
+# devDependencies.
+COPY server/package.json server/package-lock.json ./
+RUN npm ci
+
+COPY server/ ./
+
+# State lives outside the image in the relist-data volume (DATA_DIR=/data
+# is set in docker-compose.yml). Pre-create /data owned by the runtime
+# user: a fresh named volume inherits this ownership, so the non-root
+# user can write accounts, browser profiles, and photo archives.
+RUN mkdir -p /data && chown -R pwuser:pwuser /data /app/server
+
+USER pwuser
+
+EXPOSE 8787
+
+CMD ["npm", "start"]
