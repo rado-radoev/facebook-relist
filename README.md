@@ -6,12 +6,15 @@ title, price, description, stored category, condition, location, delivery),
 creates a brand-new copy, waits for Facebook's review, and only then deletes
 the old listing.
 
-> **This branch (`build/sprint-1`) is Sprint 1: the backend foundation is
-> real.** Relist app sign-in, per-user Facebook browser sessions, and the
-> Connect Facebook live remote view all work against the backend in
-> `server/`. **Listings are still the seed set** — live listings sync is
-> Sprint 2, the recreate job is Sprint 3, and the real-iPhone check is
-> Sprint 4 (see "Sprint 1" below).
+> **This branch (`build/sprint-2`) is Sprint 2: listings sync + full
+> clone recovery.** The backend now reads the signed-in person's own
+> selling list and recovers the full clone (all photos downloaded to the
+> backend archive, every field, in the verified recovery order) through
+> their own browser session. **Live verification against real Facebook is
+> still pending** — no backend profile has a real Facebook login yet, so
+> the scraping layer is verified against fixture snapshots of the two
+> spike listings, not against Facebook itself (see "Sprint 2" below).
+> The recreate job is Sprint 3; the real-iPhone check is Sprint 4.
 
 ## Sprint 1 — backend foundation
 
@@ -78,14 +81,84 @@ frames: `server/scripts/e2e-frame-*.jpg`, regenerable any time with
 
 Not built yet:
 
-- **Sprint 2:** live listings list + clone preview from the logged-in
-  session (the listings in the app today are still the seed set, labelled
-  as such on screen), including the listing-video download test.
 - **Sprint 3:** the recreate job (create → poll review → delete old only
   once the new one is Available → verify) + real history.
 - **Sprint 4:** install on the real iPhone and run one real recreate
   end-to-end. Known Sprint 4 item: the remote view's typing box is
   desktop-verified; the iOS keyboard behaviour gets checked there.
+
+## Sprint 2 — listings sync + full clone recovery
+
+What works now (all of it inside the signed-in person's own backend
+browser session; identity still comes only from the app session):
+
+- **Listings sync** — `POST /api/listings/sync` opens the person's own
+  selling list (`facebook.com/marketplace/you/selling`) read-only and
+  stores their listings per user: id, title, price, status, primary
+  photo, listing link, listed date. `GET /api/listings` serves the stored
+  set. The Listings screen shows the real synced listings when connected
+  (with a Sync / Re-sync button); before the first sync it shows the seed
+  set, clearly labelled as samples. One honesty note on status: the
+  selling list shows a single undifferentiated "Active" state, which
+  sync maps to the app's "Available" — the Available/In stock distinction
+  from other Facebook surfaces is not visible on that page.
+- **Clone recovery** — `POST /api/listings/:id/clone/recover` gathers
+  the full clone in the verified recovery order: **Edit form first**
+  (Step 1; then Step 2 via the wizard's own Next button — in-form
+  navigation, never a save), **listing page Details as fallback** (a set
+  condition appears there as a labelled row), then **missing, with the
+  reason** — a value is never invented. The known hard case is handled:
+  when an empty condition disables the edit form's Next, Step 2 is never
+  read; location still falls back to the listing page's "Listed … in
+  San Diego, CA" label, and delivery is reported missing with the
+  blocked-Step-2 reason instead of failing the whole recovery.
+- **Photo archive** — every photo the listing page exposes is downloaded
+  (original order) into `<DATA_DIR>/archive/<userId>/<listingId>/`; a
+  photo whose download fails is recorded at its own slot as missing,
+  never dropped or shifted. The person's archived photos are served back
+  only to that person (`GET /api/listings/:id/photos/:index`).
+- **Video, honestly flagged** — recovery records a listing's video and
+  attempts the same download as photos (100 MB archive cap). The clone
+  reports one of: not present / `recovered` / `present_not_downloaded`
+  with the reason. Actually downloading a real listing video is still
+  untested territory (see below).
+- **Persistence + isolation** — recoveries and the person's saved
+  picks/edits/photo selection live in the backend store, scoped by the
+  owning user (`GET/PUT /api/listings/:id/clone[/picks]`). Recovery is
+  **refused (404)** for any listing that is not in the caller's own
+  synced list, so nobody can point recovery — or clone reads, picks, or
+  photo reads — at someone else's listing. The frontend clone preview is
+  wired to this real data: synced listings get a "Run clone check" card,
+  and the recovered-vs-missing checklist (pickers for missing fields,
+  Edit for everything set) is fed by the recovery, with picks/edits
+  saved to the backend instead of localStorage.
+- **Read-only against Facebook** — sync and recovery open pages and read
+  them; the only click anywhere is the edit wizard's "Next". No listing
+  is created, edited, or deleted in this sprint (that's Sprint 3).
+
+How it is verified — and what is NOT verified yet:
+
+- **59 Vitest tests** (30 from Sprint 1, all still passing): the
+  snapshot→data mapping is unit-tested against **fixture snapshots** in
+  `server/src/fixtures/` — honest hand reconstructions, in the
+  collector's output shape, of the two listings the 2026-11-09 spike
+  verified live (Hot Wheels: 3 photos, Toys & Games, condition missing
+  everywhere, Step 2 blocked; Keyboard Switches: 5 photos + 1 video,
+  Keyboards & Keypads, Used - Like New, attributes, San Diego, Local
+  pickup only, shipping off, all meetup prefs unchecked). API tests
+  drive the full flow (register → connect → sync → recover → picks →
+  photo serving) through a fake browser serving those fixtures,
+  including the cross-user refusal cases.
+- **Live verification is PENDING the owner's first Connect (Sprint 4).**
+  No backend profile holds a real Facebook login yet, so none of the
+  scraping layer has run against real Facebook: the collector script's
+  DOM selectors, the edit-page URL pattern (`/marketplace/edit/<id>`),
+  the selling-page card/status text shapes, gallery-photo scoping on a
+  real listing page, photo downloads from Facebook's real CDN, and
+  video download are all first-run items for that session. The design
+  degrades honestly if a surface differs: an unreadable edit form falls
+  back to the listing page, and anything still unreadable is reported
+  missing with a reason — never guessed.
 
 ### Run the backend + frontend locally
 
@@ -170,29 +243,45 @@ public/
 server/                     The Relist backend (Node + TypeScript + Fastify)
   src/config.ts             Env config (PORT, DATA_DIR, CORS, proxy options)
   src/passwords.ts          scrypt password hashing (node:crypto)
-  src/store.ts              JSON store: users + hashed session tokens
+  src/store.ts              JSON store: users, hashed session tokens,
+                            per-user synced listings + clone records
   src/facebookStatus.ts     Facebook session states + page-signal detection
-  src/browserManager.ts     One persistent Playwright profile per user
+  src/browserManager.ts     One persistent Playwright profile per user;
+                            read-only snapshot collection + wizard advance
   src/connectShim.ts        CONNECT shim for picky egress proxies (only
                             used when a proxy is configured)
   src/auth.ts               Register / login / logout / me (cookie session)
   src/facebookRoutes.ts     Facebook status / connect / disconnect +
                             the live remote-view WebSocket
+  src/snapshot.ts           PageSnapshot shape + the in-page collector
+                            script (read-only) + Facebook page URLs
+  src/facebookExtract.ts    Pure snapshot → data mapping: selling list,
+                            edit form, listing Details, recovery merge
+  src/cloneTypes.ts         Synced listing / clone recovery API shapes
+  src/recovery.ts           Recovery orchestration: field merge + photo
+                            and video download into the archive
+  src/scrapeService.ts      Sync + recovery driven through the person's
+                            own browser session (synced-list gate)
+  src/listingsRoutes.ts     Listings / sync / clone / picks / photo APIs
+  src/fixtures/             Fixture snapshots of the two spike listings
+                            (labelled reconstructions — see its index.ts)
   src/*.test.ts             Vitest suites next to the code they cover
   scripts/e2e-live.mjs      Live end-to-end check against facebook.com
 src/
-  data/preview-seed.json    6 real listings used as stand-in data until Sprint 2
+  data/preview-seed.json    6 real listings used as stand-ins before the
+                            first sync (labelled samples on screen)
   data/listings.ts          Typed access to the seed data + history entries
   lib/api.ts                Backend API client (cookie session, no account ids)
+  lib/cloneMapping.ts       Backend DTOs → screen Listing mapping
   lib/status.ts             Shared status constants: labels, pill colours, filters
   lib/user.ts               Shared session constants: status labels, colours
   components/               ConnectionCard, ListingRow, StatusPill,
                             CloneCheckList, TabBar, RemoteBrowserView
   screens/                  Auth (Relist sign-in), Listings, Detail (clone
-                            preview), Progress (recreate timeline), History,
+                            preview), Progress (recreate timeline),
                             History, Connect (live Facebook login view)
-  App.tsx                   Shell: auth gate, header with signed-in identity,
-                            view switching, bottom tab bar
+  App.tsx                   Shell: auth gate, header, view switching,
+                            bottom tab bar
   styles.css                Catppuccin Mocha theme
 ```
 
@@ -226,16 +315,16 @@ Screens:
 - **History** — past recreations (the Oct 12, 2026 Hot Wheels recreate),
   belonging to the signed-in person.
 
-## Seed data (stand-in until Sprint 2)
+## Seed data (stand-in until the first sync)
 
-`src/data/preview-seed.json` and `public/listings/` are **stand-ins** for
-live listings until Sprint 2 wires the listings list to the backend
-session. The backend itself is real (see "Sprint 1" above): it runs on the
-home server, holds a separate Facebook session per household account (the
-app never stores anyone's password), and from Sprint 2 will read each
-listing from its Facebook page and edit view and download all of its
-photos — the two listings marked with `photoCount` / `category` /
-`delivery` in the seed are the ones verified live on 2026-11-09.
+`src/data/preview-seed.json` and `public/listings/` are **stand-ins**
+shown only until the person's first listings sync, and labelled as
+samples on screen. From Sprint 2 the backend session reads each listing
+from its Facebook selling list, edit view, and listing page, and
+downloads all of its photos to the archive — the two listings marked
+with `photoCount` / `category` / `delivery` in the seed are the ones
+verified live on 2026-11-09, and they are also the two fixture cases the
+Sprint 2 extraction tests are built from.
 
 ## Deploy to Vercel later
 

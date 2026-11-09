@@ -135,7 +135,12 @@ export default function App() {
   );
   if (view.kind === "detail") {
     body = (
-      <DetailScreen listing={view.listing} onBack={() => setView({ kind: "tabs" })} onRecreate={startRecreate} />
+      <DetailScreen
+        listing={view.listing}
+        facebookConnected={facebookStatus === "connected"}
+        onBack={() => setView({ kind: "tabs" })}
+        onRecreate={startRecreate}
+      />
     );
   }
   if (view.kind === "progress") {
@@ -163,7 +168,7 @@ export default function App() {
           🔁
         </span>
         <span className="app-name">Relist</span>
-        <span className="preview-badge">Sprint 1</span>
+        <span className="preview-badge">Sprint 2</span>
       </header>
 
       <main className="app-main">{body}</main>

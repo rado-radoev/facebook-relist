@@ -12,6 +12,7 @@ import {
   detectFacebookStatus,
   type FacebookStatus,
 } from "./facebookStatus.js";
+import { SNAPSHOT_SCRIPT, type PageSnapshot } from "./snapshot.js";
 import { profileDirFor, type Store } from "./store.js";
 
 export const FACEBOOK_LOGIN_URL = "https://www.facebook.com/login";
@@ -88,6 +89,46 @@ interface ActiveSession {
   poller: NodeJS.Timeout;
 }
 
+/** Clicks the edit wizard's "Next" button if it is present and enabled.
+ *  The marker comment lets test fakes recognise this call. */
+export const ADVANCE_WIZARD_SCRIPT = `/* relist-advance */ (() => {
+  const candidates = document.querySelectorAll('[role="button"], button');
+  for (const el of candidates) {
+    const label = (el.textContent || "").trim();
+    if (label !== "Next") {
+      continue;
+    }
+    const disabled = el.getAttribute("aria-disabled") === "true" || Boolean(el.disabled);
+    if (disabled) {
+      return false;
+    }
+    el.click();
+    return true;
+  }
+  return false;
+})()`;
+
+function coerceSnapshot(raw: unknown): PageSnapshot | null {
+  if (typeof raw !== "object" || raw === null) {
+    return null;
+  }
+  const record = raw as Record<string, unknown>;
+  if (typeof record.url !== "string") {
+    return null;
+  }
+  const snapshot = record as unknown as PageSnapshot;
+  if (!Array.isArray(snapshot.images)) {
+    snapshot.images = [];
+  }
+  if (!Array.isArray(snapshot.videos)) {
+    snapshot.videos = [];
+  }
+  if (typeof snapshot.text !== "string") {
+    snapshot.text = "";
+  }
+  return snapshot;
+}
+
 const POLL_INTERVAL_MS = 2000;
 
 export class BrowserManager {
@@ -112,7 +153,11 @@ export class BrowserManager {
     return user ? user.facebookStatus : "not_connected";
   }
 
-  async startLogin(userId: string): Promise<FacebookStatus> {
+  /** Open (or reuse) the user's persistent browser session without
+   *  navigating anywhere. Used by login and by read-only scraping alike:
+   *  the profile on disk is the session, so after a server restart the
+   *  first scrape reopens it and refreshStatus re-derives the state. */
+  async ensureSession(userId: string): Promise<ActiveSession> {
     let session = this.sessions.get(userId);
     if (!session) {
       const handle = await this.launcher(profileDirFor(this.dataDir, userId));
@@ -123,6 +168,11 @@ export class BrowserManager {
       session = { handle, poller };
       this.sessions.set(userId, session);
     }
+    return session;
+  }
+
+  async startLogin(userId: string): Promise<FacebookStatus> {
+    const session = await this.ensureSession(userId);
     await this.store.setFacebookStatus(userId, "login_in_progress");
     try {
       await session.handle.page.goto(FACEBOOK_LOGIN_URL);
@@ -181,6 +231,61 @@ export class BrowserManager {
       title,
       emailValue: typeof emailValue === "string" ? emailValue : null,
     };
+  }
+
+  /**
+   * Read-only page collection for Sprint 2 scraping: navigate the user's
+   * own browser to a Facebook page and return its snapshot. This never
+   * clicks, types, or submits anything on Facebook.
+   */
+  async collectSnapshotAt(userId: string, url: string): Promise<PageSnapshot | null> {
+    const session = await this.ensureSession(userId);
+    try {
+      await session.handle.page.goto(url);
+    } catch {
+      return null;
+    }
+    return this.collectCurrentSnapshot(userId);
+  }
+
+  /** Snapshot of wherever the user's browser currently is. */
+  async collectCurrentSnapshot(userId: string): Promise<PageSnapshot | null> {
+    const session = this.sessions.get(userId);
+    if (!session) {
+      return null;
+    }
+    const page = session.handle.page;
+    try {
+      // Let the React app settle before reading it.
+      await page.evaluate("new Promise((resolve) => setTimeout(resolve, 1200))");
+    } catch {
+      // A page mid-navigation can reject the wait; read it anyway.
+    }
+    try {
+      const raw = await page.evaluate(SNAPSHOT_SCRIPT);
+      return coerceSnapshot(raw);
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Advance the edit-listing wizard from Step 1 to Step 2 by clicking its
+   * "Next" button — navigation inside the form, NOT a save: this never
+   * clicks Publish/Save/Update and changes nothing on Facebook. Needed
+   * because Step 2 (location/delivery) only exists after Step 1.
+   */
+  async advanceWizard(userId: string): Promise<boolean> {
+    const session = this.sessions.get(userId);
+    if (!session) {
+      return false;
+    }
+    try {
+      const result = await session.handle.page.evaluate(ADVANCE_WIZARD_SCRIPT);
+      return result === true;
+    } catch {
+      return false;
+    }
   }
 
   async sendInput(userId: string, input: BrowserInput): Promise<boolean> {

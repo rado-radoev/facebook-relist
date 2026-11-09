@@ -7,12 +7,16 @@ import { BrowserManager, type BrowserLauncher } from "./browserManager.js";
 import type { Config } from "./config.js";
 import { startConnectShim, type ConnectShim } from "./connectShim.js";
 import { registerFacebookRoutes } from "./facebookRoutes.js";
+import { registerListingsRoutes } from "./listingsRoutes.js";
+import type { FileDownloader } from "./recovery.js";
+import { ScrapeService } from "./scrapeService.js";
 import { Store } from "./store.js";
 
 export interface AppParts {
   app: FastifyInstance;
   store: Store;
   browser: BrowserManager;
+  scraper: ScrapeService;
   shim?: ConnectShim;
 }
 
@@ -20,6 +24,8 @@ export interface BuildOptions {
   config: Config;
   store?: Store;
   launcher?: BrowserLauncher;
+  /** Injectable media downloader (tests substitute a fake CDN). */
+  downloader?: FileDownloader;
 }
 
 export async function buildApp(options: BuildOptions): Promise<AppParts> {
@@ -39,6 +45,7 @@ export async function buildApp(options: BuildOptions): Promise<AppParts> {
     proxy: browserProxy,
     ignoreCertErrors: config.browserIgnoreCertErrors,
   });
+  const scraper = new ScrapeService(store, browser, config.dataDir, options.downloader);
 
   const app = Fastify({ logger: false });
   await app.register(cookie);
@@ -49,6 +56,7 @@ export async function buildApp(options: BuildOptions): Promise<AppParts> {
 
   registerAuthRoutes(app, store, config);
   registerFacebookRoutes(app, store, browser);
+  registerListingsRoutes(app, store, scraper, config.dataDir);
 
-  return { app, store, browser, shim };
+  return { app, store, browser, scraper, shim };
 }
