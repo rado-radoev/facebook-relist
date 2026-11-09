@@ -69,6 +69,7 @@ export async function buildApp(options: BuildOptions): Promise<AppParts> {
     pollIntervalMs: config.jobPollIntervalMs,
     stuckAfterMs: config.jobStuckAfterMs,
     ...options.jobOptions,
+    withUserOperation: (userId, operation) => browser.withUserOperation(userId, operation),
   });
 
   const app = Fastify({

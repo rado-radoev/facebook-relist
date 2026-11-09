@@ -75,13 +75,18 @@ export class ScrapeService {
 
   /** Read the person's own selling list and replace their synced copy. */
   async syncListings(userId: string): Promise<SyncedListing[]> {
+    return this.browser.withUserOperation(userId, () => this.syncListingsUnsafe(userId));
+  }
+
+  private async syncListingsUnsafe(userId: string): Promise<SyncedListing[]> {
     await this.requireConnected(userId);
     const snapshot = await this.browser.collectSnapshotAt(userId, SELLING_LIST_URL);
     if (!snapshot) {
       throw new ScrapeFailedError("The selling list page could not be read.");
     }
-    const listings = parseSellingCards(snapshot.sellingCards ?? [], this.now());
-    await this.store.setListings(userId, listings);
+    const syncedAt = this.now().toISOString();
+    const listings = parseSellingCards(snapshot.sellingCards ?? [], new Date(syncedAt));
+    await this.store.setListingsSync(userId, listings, syncedAt);
     return listings;
   }
 
@@ -92,6 +97,10 @@ export class ScrapeService {
    * files (and the video, attempted) downloaded into the archive.
    */
   async recoverListing(userId: string, listingId: string): Promise<StoredClone> {
+    return this.browser.withUserOperation(userId, () => this.recoverListingUnsafe(userId, listingId));
+  }
+
+  private async recoverListingUnsafe(userId: string, listingId: string): Promise<StoredClone> {
     const synced = this.store.getListings(userId);
     if (!synced.some((listing) => listing.id === listingId)) {
       throw new ListingNotSyncedError(listingId);

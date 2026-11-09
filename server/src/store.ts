@@ -50,6 +50,8 @@ interface StoreData {
    *  only ever appears here from that user's own session work — reads
    *  always go through the caller's own id. */
   listings: Record<string, SyncedListing[]>;
+  /** Last successful sync time, independent of listing count. */
+  listingsSyncedAt?: Record<string, string>;
   /** Sprint 2: clone recoveries + saved picks/edits, per user per listing. */
   clones: Record<string, Record<string, StoredClone>>;
   /** Sprint 3: recreate jobs, per user. The job record IS the state
@@ -62,7 +64,10 @@ interface StoreData {
 }
 
 function emptyData(): StoreData {
-  return { users: [], sessions: [], listings: {}, clones: {}, jobs: {}, history: {}, facebookIdentityHashes: {} };
+  return {
+    users: [], sessions: [], listings: {}, listingsSyncedAt: {}, clones: {}, jobs: {}, history: {},
+    facebookIdentityHashes: {},
+  };
 }
 
 export function hashToken(token: string): string {
@@ -110,7 +115,7 @@ export class Store {
     if (!Array.isArray(record.users) || !Array.isArray(record.sessions)) {
       throw new Error("Store file is missing required account data");
     }
-    for (const key of ["listings", "clones", "jobs", "history"] as const) {
+    for (const key of ["listings", "listingsSyncedAt", "clones", "jobs", "history"] as const) {
       if (record[key] !== undefined && (typeof record[key] !== "object" || record[key] === null || Array.isArray(record[key]))) {
         throw new Error(`Store file has invalid ${key} data`);
       }
@@ -229,6 +234,7 @@ export class Store {
     const current = this.data.facebookIdentityHashes?.[userId];
     if (current === identityHash) return false;
     delete this.data.listings[userId];
+    delete this.data.listingsSyncedAt?.[userId];
     delete this.data.clones[userId];
     delete this.data.jobs[userId];
     delete this.data.history[userId];
@@ -287,9 +293,40 @@ export class Store {
   }
 
   async setListings(userId: string, listings: SyncedListing[]): Promise<void> {
+    const syncedAt = listings.at(-1)?.syncedAt;
+    if (!syncedAt) {
+      throw new Error("An empty sync must provide its successful sync timestamp");
+    }
+    await this.setListingsSync(userId, listings, syncedAt);
+  }
+
+  getListingsSyncedAt(userId: string): string | null {
     this.ensureLoaded();
+    const stored = this.data.listingsSyncedAt?.[userId];
+    if (stored) return stored;
+    return this.data.listings[userId]?.at(-1)?.syncedAt ?? null;
+  }
+
+  async setListingsSync(userId: string, listings: SyncedListing[], syncedAt: string): Promise<void> {
+    this.ensureLoaded();
+    const next = new Date(syncedAt);
+    if (!Number.isFinite(next.getTime()) || next.toISOString() !== syncedAt) {
+      throw new Error("Listings sync timestamp must be a valid ISO date");
+    }
+    const previousListings = this.data.listings[userId];
+    const previousSyncedAt = this.data.listingsSyncedAt?.[userId];
     this.data.listings[userId] = listings;
-    await this.save();
+    this.data.listingsSyncedAt ??= {};
+    this.data.listingsSyncedAt[userId] = syncedAt;
+    try {
+      await this.save();
+    } catch (error) {
+      if (previousListings === undefined) delete this.data.listings[userId];
+      else this.data.listings[userId] = previousListings;
+      if (previousSyncedAt === undefined) delete this.data.listingsSyncedAt[userId];
+      else this.data.listingsSyncedAt[userId] = previousSyncedAt;
+      throw error;
+    }
   }
 
   getClone(userId: string, listingId: string): StoredClone | undefined {

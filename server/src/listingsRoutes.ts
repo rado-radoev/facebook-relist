@@ -115,7 +115,7 @@ export function registerListingsRoutes(
       return;
     }
     const listings = store.getListings(user.id);
-    const syncedAt = listings.length > 0 ? listings[0].syncedAt : null;
+    const syncedAt = store.getListingsSyncedAt(user.id);
     await reply.send({ listings, syncedAt });
   });
 
@@ -127,7 +127,7 @@ export function registerListingsRoutes(
     }
     try {
       const listings = await scraper.syncListings(user.id);
-      const syncedAt = listings.length > 0 ? listings[0].syncedAt : null;
+      const syncedAt = store.getListingsSyncedAt(user.id);
       await reply.send({ listings, syncedAt });
     } catch (error) {
       if (error instanceof FacebookNotConnectedError) {

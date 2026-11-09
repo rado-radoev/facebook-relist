@@ -173,11 +173,40 @@ describe("listings sync + clone recovery API", () => {
       headers: { cookie: cookieA, origin: "http://localhost:5173" },
     });
     expect(sync.statusCode).toBe(200);
-    const listings = sync.json().listings as Array<Record<string, unknown>>;
+    const listings = sync.json().listings as import("./cloneTypes.js").SyncedListing[];
     expect(listings).toHaveLength(2);
     expect(listings[0].id).toBe(HOT_WHEELS_ID);
     expect(listings[1].id).toBe(SWITCHES_ID);
     expect(sync.json().syncedAt).toBeTruthy();
+
+    let releaseOperation!: () => void;
+    let operationStarted!: () => void;
+    const started = new Promise<void>((resolve) => { operationStarted = resolve; });
+    const hold = new Promise<void>((resolve) => { releaseOperation = resolve; });
+    const activeOperation = parts.browser.withUserOperation(userAId, async () => {
+      operationStarted();
+      await hold;
+    });
+    await started;
+    let syncFinished = false;
+    const queuedSync = parts.scraper.syncListings(userAId).then(() => { syncFinished = true; });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(syncFinished).toBe(false);
+    releaseOperation();
+    await activeOperation;
+    await queuedSync;
+    expect(syncFinished).toBe(true);
+
+    const emptySyncedAt = "2026-11-09T12:00:00.000Z";
+    await parts.store.setListingsSync(userAId, [], emptySyncedAt);
+    const res = await parts.app.inject({
+      method: "GET",
+      url: "/api/listings",
+      headers: { cookie: cookieA, origin: "http://localhost:5173" },
+    });
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toEqual({ listings: [], syncedAt: emptySyncedAt });
+    await parts.store.setListingsSync(userAId, listings, sync.json().syncedAt as string);
   });
 
   it("recovers the full clone for a synced listing, archiving the photo files", async () => {

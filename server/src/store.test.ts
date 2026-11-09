@@ -99,6 +99,40 @@ describe("Store users", () => {
     expect((await stat(dataDir)).mode & 0o777).toBe(0o700);
     expect((await stat(path.join(dataDir, "relist-data.json"))).mode & 0o777).toBe(0o600);
   });
+
+  it("persists a successful empty listings sync timestamp across restart", async () => {
+    const user = await store.createUser({ name: "Empty", email: "empty@example.com", passwordHash: "x" });
+    const syncedAt = "2026-11-09T12:00:00.000Z";
+    await store.setListingsSync(user.id, [], syncedAt);
+
+    const reopened = new Store(dataDir);
+    await reopened.load();
+    expect(reopened.getListings(user.id)).toEqual([]);
+    expect(reopened.getListingsSyncedAt(user.id)).toBe(syncedAt);
+  });
+
+  it("keeps the last good sync in memory when persistence fails", async () => {
+    const user = await store.createUser({ name: "Stable", email: "stable@example.com", passwordHash: "x" });
+    const original = [{
+      id: "original", title: "Original", price: "$1", status: "active", statusText: "Active",
+      photoUrl: "", url: "https://www.facebook.com/marketplace/item/original", listedDate: null,
+      syncedAt: "2026-11-09T12:00:00.000Z",
+    }];
+    await store.setListingsSync(user.id, original, original[0].syncedAt);
+    const writableStore = store as unknown as { save: () => Promise<void> };
+    const save = writableStore.save.bind(store);
+    writableStore.save = async () => {
+      throw new Error("synthetic storage failure");
+    };
+    try {
+      await expect(store.setListingsSync(user.id, [], "2026-11-09T13:00:00.000Z"))
+        .rejects.toThrow("synthetic storage failure");
+      expect(store.getListings(user.id)).toEqual(original);
+      expect(store.getListingsSyncedAt(user.id)).toBe(original[0].syncedAt);
+    } finally {
+      writableStore.save = save;
+    }
+  });
 });
 
 describe("Store sessions", () => {
