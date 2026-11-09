@@ -5,6 +5,7 @@ import Fastify, { type FastifyInstance } from "fastify";
 import { registerAuthRoutes } from "./auth.js";
 import { BrowserManager, type BrowserLauncher } from "./browserManager.js";
 import type { Config } from "./config.js";
+import { buildCorsOrigin } from "./corsOrigin.js";
 import { startConnectShim, type ConnectShim } from "./connectShim.js";
 import {
   FacebookDriver,
@@ -70,8 +71,33 @@ export async function buildApp(options: BuildOptions): Promise<AppParts> {
   });
 
   const app = Fastify({ logger: false });
+
+  // The API client sends body-less action POSTs (connect, disconnect,
+  // sync, recover, job create, logout) that can carry a
+  // "Content-Type: application/json" header with no body at all.
+  // Fastify's default JSON parser rejects those before any route runs
+  // (400 FST_ERR_CTP_EMPTY_JSON_BODY — the UI shows just "Bad
+  // Request"). Treat an empty JSON body as {} here, in one place, for
+  // every current and future body-less POST. Real bodies still parse
+  // (and malformed ones still error) via JSON.parse below.
+  app.addContentTypeParser("application/json", { parseAs: "string" }, (_request, body, done) => {
+    const text = body as string;
+    if (text.trim() === "") {
+      done(null, {});
+      return;
+    }
+    try {
+      done(null, JSON.parse(text));
+    } catch (error) {
+      // Match the default parser: a malformed body is a 400, not a 500.
+      const parseError = error as Error & { statusCode?: number };
+      parseError.statusCode = 400;
+      done(parseError);
+    }
+  });
+
   await app.register(cookie);
-  await app.register(cors, { origin: config.corsOrigin, credentials: true });
+  await app.register(cors, { origin: buildCorsOrigin(config.corsOrigin), credentials: true });
   await app.register(websocket);
 
   app.get("/api/health", async () => ({ ok: true }));

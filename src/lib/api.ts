@@ -12,7 +12,19 @@ import type {
   SyncedListing,
 } from "../types";
 
-const API_BASE: string = import.meta.env.VITE_API_BASE_URL ?? "http://localhost:8787";
+/**
+ * Default API base: the same host the page itself was served from, on
+ * the backend's port. Hardcoding "localhost" broke sign-in whenever
+ * the page was opened as 127.0.0.1 (or [::1]) — the browser then
+ * resolved the API host differently from the backend's listener.
+ * VITE_API_BASE_URL still overrides everything.
+ */
+function defaultApiBase(): string {
+  const { protocol, hostname } = window.location;
+  return `${protocol}//${hostname}:8787`;
+}
+
+const API_BASE: string = import.meta.env.VITE_API_BASE_URL ?? defaultApiBase();
 
 export interface ApiUser {
   id: string;
@@ -35,10 +47,20 @@ export class ApiError extends Error {
 }
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
+  // Claim a JSON content type only when a body is actually sent. A
+  // body-less POST sent with "Content-Type: application/json" makes
+  // strict JSON parsers reject the request before it reaches a route
+  // (the backend also tolerates it now — this is belt and braces).
+  const headers: Record<string, string> = {
+    ...(init?.headers as Record<string, string> | undefined),
+  };
+  if (init?.body != null && headers["Content-Type"] === undefined) {
+    headers["Content-Type"] = "application/json";
+  }
   const response = await fetch(`${API_BASE}${path}`, {
     credentials: "include",
-    headers: { "Content-Type": "application/json" },
     ...init,
+    headers,
   });
   const body = (await response.json().catch(() => ({}))) as Record<string, unknown>;
   if (!response.ok) {

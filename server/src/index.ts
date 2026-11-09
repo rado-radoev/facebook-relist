@@ -32,7 +32,7 @@ process.on("SIGTERM", () => {
 });
 
 await app.listen({ port: config.port, host: config.host });
-console.log(`Relist backend listening on http://${config.host}:${config.port}`);
+console.log(`Relist backend listening on port ${config.port} (host ${config.host})`);
 console.log(`Data directory: ${config.dataDir}`);
 console.log(
   config.dryRun
