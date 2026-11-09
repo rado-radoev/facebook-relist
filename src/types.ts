@@ -1,7 +1,7 @@
 export interface MeetupPrefs {
-  public: boolean;
-  doorPickup: boolean;
-  doorDropoff: boolean;
+  public: boolean | null;
+  doorPickup: boolean | null;
+  doorDropoff: boolean | null;
 }
 
 export type SessionStatus =
@@ -40,6 +40,7 @@ export interface Listing {
   category: string | null;
   conditionFlag?: string | null;
   delivery: string | null;
+  deliveryInfo?: DeliveryInfo | null;
   shipping?: string;
   meetup?: MeetupPrefs;
   attributes?: Record<string, string>;
@@ -50,7 +51,18 @@ export interface Listing {
   /** Sprint 2: how many of the recovered photos actually downloaded. */
   photosDownloaded?: number;
   /** Sprint 2: state of the listing's video in the backend archive. */
-  videoState?: "none" | "recovered" | "present_not_downloaded";
+  videoState?: "none" | "recovered" | "present_not_downloaded" | "unknown";
+  videoPresence?: "present" | "absent" | "unknown";
+  /** Per-field recovery explanation, preserved from the backend clone DTO. */
+  recoveryReasons?: Partial<
+    Record<"title" | "price" | "description" | "category" | "condition" | "location" | "delivery" | "attributes" | "photos" | "video", string>
+  >;
+  fieldStates?: Partial<Record<"title" | "price" | "description" | "category" | "condition" | "location" | "delivery" | "attributes" | "photos" | "video", "recovered" | "missing" | "unknown" | "not_applicable">>;
+  photoReasons?: Array<string | null>;
+  photoCompleteness?: "complete" | "incomplete" | "unknown";
+  photoExpectedCount?: number | null;
+  photoIdentities?: string[];
+  videoReason?: string | null;
 }
 
 // ---------------------------------------------------------------------------
@@ -73,13 +85,32 @@ export type FieldSource = "edit_form" | "listing_details";
 export interface FieldResult<T> {
   value: T | null;
   source: FieldSource | null;
+  /** Additive status from newer recoveries; absent on older stored records. */
+  state?: "recovered" | "missing" | "unknown" | "not_applicable";
   reason: string | null;
 }
 
 export interface DeliveryInfo {
   type: string | null;
   shipping: boolean | null;
-  meetup: MeetupPrefs | null;
+  meetup: { public: boolean | null; doorPickup: boolean | null; doorDropoff: boolean | null } | null;
+}
+
+export interface PhotoRecovery {
+  urls: string[];
+  files: Array<string | null>;
+  downloaded: number;
+  expectedCount?: number | null;
+  complete?: boolean;
+  identities?: string[];
+  reasons?: Array<string | null>;
+}
+
+export interface VideoRecovery {
+  present: boolean | null;
+  state: "none" | "recovered" | "present_not_downloaded" | "unknown";
+  file: string | null;
+  reason: string | null;
 }
 
 export interface CloneRecovery {
@@ -93,17 +124,8 @@ export interface CloneRecovery {
   attributes: FieldResult<Record<string, string>>;
   location: FieldResult<string>;
   delivery: FieldResult<DeliveryInfo>;
-  photos: {
-    urls: string[];
-    files: Array<string | null>;
-    downloaded: number;
-  };
-  video: {
-    present: boolean;
-    state: "none" | "recovered" | "present_not_downloaded";
-    file: string | null;
-    reason: string | null;
-  };
+  photos: PhotoRecovery;
+  video: VideoRecovery;
   step2Blocked: boolean;
 }
 

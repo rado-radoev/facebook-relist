@@ -54,6 +54,8 @@ export interface FormSnapshot {
   checkboxes: FormToggleState[];
   switches: FormToggleState[];
   buttons: FormButtonState[];
+  /** True only when the collector positively saw and read the attribute section. */
+  attributesObserved?: boolean;
 }
 
 export interface PageSnapshot {
@@ -64,6 +66,26 @@ export interface PageSnapshot {
   images: string[];
   /** Video URLs the page exposes (video src / source src). */
   videos: string[];
+  /** Positive evidence about the page surface; missing metadata is unknown. */
+  surface?: {
+    kind: "selling_list" | "edit_form" | "listing" | "unknown";
+    listingId: string | null;
+    readiness: "ready" | "loading" | "checkpoint" | "unknown";
+  };
+  /** Selling-list completion; counts must be positively observed. */
+  completion?: {
+    state: "complete" | "incomplete" | "unknown";
+    expectedCount: number | null;
+    observedCount: number;
+  };
+  /** Listing gallery completion and explicit video evidence. */
+  gallery?: {
+    state: "complete" | "incomplete" | "unknown";
+    expectedCount: number | null;
+    observedCount: number;
+    videoPresence: "present" | "absent" | "unknown";
+    slots?: Array<{ identity: string; url: string }>;
+  };
   /** Present on the selling-list page. */
   sellingCards?: SellingCard[];
   /** Present on a listing page: its Details section as label/value rows. */
@@ -97,34 +119,63 @@ export function editListingUrl(listingId: string): string {
  * It clicks nothing and submits nothing — read-only by construction.
  */
 export const SNAPSHOT_SCRIPT = `(() => {
-  const text = document.body ? document.body.innerText : "";
+  const text = document.body ? (document.body.innerText || document.body.textContent || "") : "";
 
-  const images = [];
-  const seenImages = new Set();
-  for (const img of document.querySelectorAll("img")) {
-    const src = img.currentSrc || img.src || "";
-    if (src && !seenImages.has(src)) {
-      seenImages.add(src);
-      images.push(src);
-    }
-  }
+  const pagePath = location.pathname;
+  const pathParts = pagePath.split("/").filter(Boolean);
+  const requestedId = pathParts[0] === "marketplace" && (pathParts[1] === "edit" || pathParts[1] === "item") ? pathParts[2] || null : null;
+  const isSellingPath = pagePath.replace(/\\/$/, "") === "/marketplace/you/selling";
+  const isEditPath = pathParts[0] === "marketplace" && pathParts[1] === "edit" && Boolean(requestedId);
+  const isListingPath = pathParts[0] === "marketplace" && pathParts[1] === "item" && Boolean(requestedId);
+  const pageTextLower = text.toLowerCase();
+  const checkpoint = /checkpoint|confirm your identity|security check|log in to facebook/.test(pageTextLower) || pathParts.includes("login") || pathParts.includes("checkpoint");
+  const surface = {
+    kind: isSellingPath ? "selling_list" : isEditPath ? "edit_form" : isListingPath ? "listing" : "unknown",
+    listingId: requestedId,
+    readiness: checkpoint ? "checkpoint" : document.readyState === "complete" && (text.trim() || document.querySelector('[role="main"]')) ? "ready" : "loading",
+  };
 
   const videos = [];
-  for (const video of document.querySelectorAll("video")) {
-    const src = video.currentSrc || video.src || "";
-    if (src) {
-      videos.push(src);
+  const galleryNodes = [...document.querySelectorAll('[role="main"] [role="group"][aria-label], [role="main"] [role="region"][aria-label]')]
+    .filter((node) => /photo|gallery|listing images/i.test(node.getAttribute("aria-label") || ""));
+  const galleryNode = galleryNodes.length === 1 ? galleryNodes[0] : null;
+  const images = [];
+  const identities = [];
+  if (galleryNode) {
+    for (const img of galleryNode.querySelectorAll("img")) {
+      const src = img.currentSrc || img.src || "";
+      if (!src) continue;
+      const parsed = new URL(src, location.href);
+      const stable = parsed.searchParams.get("fbid") || parsed.searchParams.get("id") || parsed.pathname;
+      const identity = img.getAttribute("data-media-id") || img.getAttribute("data-photo-id") || stable;
+      if (identities.includes(identity)) continue;
+      identities.push(identity);
+      images.push(src);
     }
-    for (const source of video.querySelectorAll("source")) {
-      if (source.src) {
-        videos.push(source.src);
+    for (const video of galleryNode.querySelectorAll("video")) {
+      const src = video.currentSrc || video.src || "";
+      if (src) videos.push(src);
+      for (const source of video.querySelectorAll("source")) {
+        if (source.src) videos.push(source.src);
       }
     }
   }
+  const galleryLabel = galleryNode ? galleryNode.getAttribute("aria-label") || "" : "";
+  const galleryText = galleryNode ? galleryNode.innerText || "" : "";
+  const galleryCountMatch = /\\bof\\s+(\\d+)\\b/i.exec(galleryLabel + " " + galleryText);
+  const galleryCountAttribute = galleryNode ? galleryNode.getAttribute("data-count") : null;
+  const galleryExpected = galleryCountMatch ? Number(galleryCountMatch[1]) : galleryCountAttribute && /^\\d+$/.test(galleryCountAttribute) ? Number(galleryCountAttribute) : null;
+  const gallery = {
+    state: galleryNode && galleryExpected !== null && galleryExpected === images.length ? "complete" : galleryNode && galleryExpected !== null ? "incomplete" : "unknown",
+    expectedCount: galleryExpected,
+    observedCount: images.length,
+    videoPresence: videos.length > 0 ? "present" : /0 videos?|no videos?/i.test(galleryLabel + " " + galleryText) ? "absent" : "unknown",
+    slots: images.map((url, index) => ({ identity: identities[index], url })),
+  };
 
   const sellingCards = [];
   const seenCards = new Set();
-  for (const link of document.querySelectorAll('a[href*="/marketplace/item/"]')) {
+  for (const link of (isSellingPath ? document.querySelectorAll('[role="main"] a[href*="/marketplace/item/"]') : [])) {
     const href = link.href || "";
     if (!href || seenCards.has(href)) {
       continue;
@@ -170,10 +221,8 @@ export const SNAPSHOT_SCRIPT = `(() => {
   const labelFor = (el) => {
     const labelledBy = el.getAttribute("aria-labelledby");
     if (labelledBy) {
-      const labelEl = document.getElementById(labelledBy);
-      if (labelEl) {
-        return (labelEl.textContent || "").trim();
-      }
+      const labels = labelledBy.split(/\\s+/).map((id) => document.getElementById(id)).filter(Boolean).map((labelEl) => (labelEl.textContent || "").trim()).filter(Boolean);
+      if (labels.length) return labels.join(" ");
     }
     const aria = el.getAttribute("aria-label");
     if (aria) {
@@ -185,17 +234,32 @@ export const SNAPSHOT_SCRIPT = `(() => {
         return (byFor.textContent || "").trim();
       }
     }
+    const wrapping = el.closest("label");
+    if (wrapping) return (wrapping.textContent || "").replace(el.value || "", "").trim();
     return "";
   };
 
   const inputs = [];
   for (const el of document.querySelectorAll("input, textarea")) {
-    if (el.type === "checkbox" || el.type === "radio" || el.type === "hidden") {
+    if (["checkbox", "radio", "hidden", "password", "submit", "button", "file"].includes((el.type || "").toLowerCase())) {
       continue;
     }
     inputs.push({ label: labelFor(el), value: el.value || "" });
   }
+  for (const el of document.querySelectorAll('[contenteditable="true"]')) {
+    const value = (el.innerText || el.textContent || "").trim();
+    if (value) inputs.push({ label: labelFor(el), value });
+  }
   const selects = [];
+  for (const el of document.querySelectorAll("select")) {
+    const value = el.selectedOptions && el.selectedOptions.length ? (el.selectedOptions[0].textContent || "").trim() : "";
+    if (value) selects.push({ label: labelFor(el), value });
+  }
+  for (const el of document.querySelectorAll('[role="combobox"]')) {
+    const expanded = el.getAttribute("aria-expanded") === "true";
+    const value = (el.innerText || el.textContent || "").trim();
+    if (!expanded && value && !selects.some((item) => item.label === labelFor(el) && item.value === value)) selects.push({ label: labelFor(el), value });
+  }
   for (const el of document.querySelectorAll('[aria-selected="true"], [role="option"][aria-checked="true"]')) {
     const value = (el.textContent || "").trim();
     if (value) {
@@ -203,8 +267,8 @@ export const SNAPSHOT_SCRIPT = `(() => {
     }
   }
   const checkboxes = [];
-  for (const el of document.querySelectorAll('input[type="checkbox"]')) {
-    checkboxes.push({ label: labelFor(el), checked: Boolean(el.checked) });
+  for (const el of document.querySelectorAll('input[type="checkbox"], [role="checkbox"]')) {
+    checkboxes.push({ label: labelFor(el), checked: el.getAttribute("role") === "checkbox" ? el.getAttribute("aria-checked") === "true" : Boolean(el.checked) });
   }
   const switches = [];
   for (const el of document.querySelectorAll('[role="switch"]')) {
@@ -224,13 +288,28 @@ export const SNAPSHOT_SCRIPT = `(() => {
     }
   }
 
+  const attributesObserved = Boolean(document.querySelector('[data-section="attributes"], [aria-label="Attributes"]')) ||
+    [...inputs, ...selects].some((field) => field.label && !/^(title|price|description|category|condition|location|delivery|shipping|public meetup|door pickup|door dropoff)$/i.test(field.label));
+  const main = document.querySelector('[role="main"]');
+  const completionText = main ? (main.innerText || main.textContent || "") : "";
+  const completionMatch = /\\b(\\d+)\\s+(?:active\\s+)?listings?\\b/i.exec(completionText) || /\\b(\\d+)\\s+results?\\b/i.exec(completionText);
+  const expectedCount = completionMatch ? Number(completionMatch[1]) : null;
+  const completion = {
+    state: !isSellingPath ? "unknown" : expectedCount === null ? "unknown" : expectedCount === sellingCards.length ? "complete" : "incomplete",
+    expectedCount,
+    observedCount: sellingCards.length,
+  };
+
   return {
     url: location.href,
     text,
     images,
     videos,
+    surface,
+    completion,
+    gallery,
     sellingCards,
     detailRows,
-    form: { inputs, selects, checkboxes, switches, buttons },
+    form: { inputs, selects, checkboxes, switches, buttons, attributesObserved },
   };
 })()`;

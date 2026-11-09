@@ -20,9 +20,11 @@ export const JOB_STATUSES = [
   "in_review",
   "available",
   "deleting",
+  "delete_intent",
   "done",
   "stuck",
   "failed",
+  "needs_input",
 ] as const;
 
 export type JobStatus = (typeof JOB_STATUSES)[number];
@@ -31,6 +33,7 @@ export const TERMINAL_JOB_STATUSES: ReadonlySet<JobStatus> = new Set([
   "done",
   "stuck",
   "failed",
+  "needs_input",
 ]);
 
 export function isTerminalJobStatus(status: JobStatus): boolean {
@@ -75,8 +78,20 @@ export interface RecreateJob {
   /** The OLD listing this job recreates. */
   listingId: string;
   listingTitle: string;
-  /** The synced listing's public URL, for history/reporting. */
+  /** The old listing fields approved at job creation for change detection. */
   oldListingUrl: string;
+  originalListing: {
+    id: string;
+    title: string;
+    price: string;
+    status: string;
+    photoUrl: string;
+    url: string;
+  };
+  /** Hash of the immutable resolved clone payload and approved media bytes. */
+  approvedPayloadHash: string;
+  /** Hashes parallel to data.photoFiles plus the optional video. */
+  mediaHashes: { photos: string[]; video: string | null };
   status: JobStatus;
   /** True when this job can never write to Facebook (see header). */
   dryRun: boolean;

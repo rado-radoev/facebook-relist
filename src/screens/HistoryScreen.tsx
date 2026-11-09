@@ -1,7 +1,6 @@
 import { useEffect, useState } from "react";
 import type { JobHistoryEntry } from "../types";
 import { fetchJobHistory } from "../lib/api";
-import { historyEntries } from "../data/listings";
 
 type LoadState =
   | { kind: "loading" }
@@ -89,20 +88,9 @@ export default function HistoryScreen() {
       ) : null}
 
       {state.kind === "unreachable" ? (
-        <>
-          <p className="empty-note">
-            Couldn't reach the backend, so your real history isn't shown. Sample from the preview:
-          </p>
-          <div className="listing-list">
-            {historyEntries.map((entry) => (
-              <article key={entry.id} className="history-card">
-                <p className="history-date">{entry.dateLabel}</p>
-                <p className="history-title">{entry.title}</p>
-                <p className="history-detail">{entry.detail}</p>
-              </article>
-            ))}
-          </div>
-        </>
+        <p className="empty-note">
+          Couldn't reach the backend, so your real history isn't available. Reconnect and try again.
+        </p>
       ) : null}
     </div>
   );

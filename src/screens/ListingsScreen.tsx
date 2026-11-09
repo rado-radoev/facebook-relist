@@ -1,10 +1,8 @@
 import { useCallback, useEffect, useState } from "react";
 import type { CurrentUser, Listing } from "../types";
-import { listings as seedListings } from "../data/listings";
 import { fetchListings, syncListings } from "../lib/api";
 import { syncedToListing } from "../lib/cloneMapping";
 import { FILTERS, matchesFilter, type FilterId } from "../lib/status";
-import { firstName } from "../lib/user";
 import ConnectionCard from "../components/ConnectionCard";
 import ListingRow from "../components/ListingRow";
 
@@ -18,7 +16,7 @@ interface Props {
 type ListSource =
   | { kind: "loading" }
   | { kind: "synced"; listings: Listing[]; syncedAt: string | null }
-  | { kind: "seed" };
+  | { kind: "unavailable" };
 
 export default function ListingsScreen({ user, onConnect, onDisconnect, onOpen }: Props) {
   const [filter, setFilter] = useState<FilterId>("active");
@@ -30,18 +28,14 @@ export default function ListingsScreen({ user, onConnect, onDisconnect, onOpen }
   const loadSynced = useCallback(async () => {
     try {
       const data = await fetchListings();
-      if (data.listings.length > 0) {
-        setSource({
-          kind: "synced",
-          listings: data.listings.map((synced) => syncedToListing(synced, user.id)),
-          syncedAt: data.syncedAt,
-        });
-      } else {
-        setSource({ kind: "seed" });
-      }
+      setSource({
+        kind: "synced",
+        listings: data.listings.map((synced) => syncedToListing(synced, user.id)),
+        syncedAt: data.syncedAt,
+      });
     } catch {
-      // Backend unreachable — fall back to the labelled seed set.
-      setSource({ kind: "seed" });
+      // Never substitute another user's or demo data for this account.
+      setSource({ kind: "unavailable" });
     }
   }, [user.id]);
 
@@ -68,8 +62,7 @@ export default function ListingsScreen({ user, onConnect, onDisconnect, onOpen }
     }
   }
 
-  const shownListings: Listing[] =
-    source.kind === "synced" ? source.listings : seedListings;
+  const shownListings: Listing[] = source.kind === "synced" ? source.listings : [];
   const visible = shownListings.filter((listing) => matchesFilter(listing.status, filter));
 
   let syncLabel = "Sync my listings";
@@ -79,12 +72,10 @@ export default function ListingsScreen({ user, onConnect, onDisconnect, onOpen }
     syncLabel = "Re-sync listings";
   }
 
-  let footnote: string;
+  let footnote = "";
   if (source.kind === "synced") {
     const when = source.syncedAt ? new Date(source.syncedAt).toLocaleString() : "";
     footnote = `Your real listings, synced from your own Facebook selling list${when ? ` · ${when}` : ""}. Tap one to run its clone check.`;
-  } else {
-    footnote = `These are sample listings standing in for ${firstName(user.displayName)}'s real ones — sync to replace them with the listings from your own Facebook session.`;
   }
 
   return (
@@ -105,7 +96,9 @@ export default function ListingsScreen({ user, onConnect, onDisconnect, onOpen }
             {source.kind === "synced" ? (
               <span className="sync-note">From your Facebook selling list</span>
             ) : (
-              <span className="sync-note">Showing sample listings until you sync</span>
+              <span className="sync-note">
+                {source.kind === "unavailable" ? "No listing data available" : "Loading your account's listings"}
+              </span>
             )}
           </div>
           {syncError ? <p className="blocked-note">Sync failed: {syncError}</p> : null}
@@ -125,10 +118,16 @@ export default function ListingsScreen({ user, onConnect, onDisconnect, onOpen }
           </div>
 
           <div className="listing-list">
+            {source.kind === "loading" ? <p className="empty-note">Loading your listings…</p> : null}
+            {source.kind === "unavailable" ? (
+              <p className="blocked-note">Couldn't load your listings. Retry sync to check the backend connection.</p>
+            ) : null}
             {visible.map((listing) => (
               <ListingRow key={listing.listing_id} listing={listing} onOpen={onOpen} />
             ))}
-            {visible.length === 0 ? <p className="empty-note">No listings with this status.</p> : null}
+            {source.kind === "synced" && visible.length === 0 ? (
+              <p className="empty-note">No listings with this status.</p>
+            ) : null}
           </div>
 
           <p className="screen-footnote">{footnote}</p>

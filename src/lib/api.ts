@@ -12,19 +12,12 @@ import type {
   SyncedListing,
 } from "../types";
 
-/**
- * Default API base: the same host the page itself was served from, on
- * the backend's port. Hardcoding "localhost" broke sign-in whenever
- * the page was opened as 127.0.0.1 (or [::1]) — the browser then
- * resolved the API host differently from the backend's listener.
- * VITE_API_BASE_URL still overrides everything.
- */
-function defaultApiBase(): string {
-  const { protocol, hostname } = window.location;
-  return `${protocol}//${hostname}:8787`;
-}
+const API_BASE = (import.meta.env.VITE_API_BASE_URL ?? "").replace(/\/$/, "");
 
-const API_BASE: string = import.meta.env.VITE_API_BASE_URL ?? defaultApiBase();
+/** Use the app origin in production; Vite proxies same-origin /api calls in development. */
+function apiUrl(path: string): string {
+  return `${API_BASE}${path}`;
+}
 
 export interface ApiUser {
   id: string;
@@ -57,7 +50,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   if (init?.body != null && headers["Content-Type"] === undefined) {
     headers["Content-Type"] = "application/json";
   }
-  const response = await fetch(`${API_BASE}${path}`, {
+  const response = await fetch(apiUrl(path), {
     credentials: "include",
     ...init,
     headers,
@@ -116,7 +109,8 @@ export async function disconnectFacebook(): Promise<SessionStatus> {
 
 /** WebSocket URL for the live remote view of the backend browser. */
 export function facebookViewSocketUrl(): string {
-  return `${API_BASE.replace(/^http/, "ws")}/api/facebook/view`;
+  const base = API_BASE || window.location.origin;
+  return `${base.replace(/^http/, "ws")}/api/facebook/view`;
 }
 
 // ---------------------------------------------------------------------------

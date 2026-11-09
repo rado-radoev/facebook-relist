@@ -50,6 +50,31 @@ export class ScrapeFailedError extends Error {
   }
 }
 
+interface UserOperationBrowser {
+  withUserOperation?<T>(userId: string, operation: () => Promise<T>): Promise<T>;
+}
+
+function withUserOperation<T>(browser: BrowserManager, userId: string, operation: () => Promise<T>): Promise<T> {
+  const coordinator = (browser as unknown as UserOperationBrowser).withUserOperation;
+  return coordinator ? coordinator.bind(browser)(userId, operation) : operation();
+}
+
+function isExpectedPage(snapshot: PageSnapshot, kind: "selling_list" | "edit_form" | "listing", listingId?: string): boolean {
+  let url: URL;
+  try {
+    url = new URL(snapshot.url);
+  } catch {
+    return false;
+  }
+  if (url.protocol !== "https:" || url.hostname !== "www.facebook.com" || snapshot.surface?.kind !== kind || snapshot.surface.readiness !== "ready") {
+    return false;
+  }
+  if (listingId && snapshot.surface.listingId !== listingId) return false;
+  if (kind === "selling_list") return url.pathname === "/marketplace/you/selling" && snapshot.surface.listingId === null;
+  const route = kind === "edit_form" ? `/marketplace/edit/${listingId}` : `/marketplace/item/${listingId}`;
+  return url.pathname === route;
+}
+
 export class ScrapeService {
   private readonly downloader: FileDownloader;
   private readonly now: () => Date;
@@ -75,14 +100,25 @@ export class ScrapeService {
 
   /** Read the person's own selling list and replace their synced copy. */
   async syncListings(userId: string): Promise<SyncedListing[]> {
-    await this.requireConnected(userId);
-    const snapshot = await this.browser.collectSnapshotAt(userId, SELLING_LIST_URL);
-    if (!snapshot) {
-      throw new ScrapeFailedError("The selling list page could not be read.");
-    }
-    const listings = parseSellingCards(snapshot.sellingCards ?? [], this.now());
-    await this.store.setListings(userId, listings);
-    return listings;
+    return withUserOperation(this.browser, userId, () => this.syncListingsUnsafe(userId));
+  }
+
+  private async syncListingsUnsafe(userId: string): Promise<SyncedListing[]> {
+      await this.requireConnected(userId);
+      const snapshot = await this.browser.collectSnapshotAt(userId, SELLING_LIST_URL);
+      if (!snapshot || !isExpectedPage(snapshot, "selling_list")) {
+        throw new ScrapeFailedError("The verified selling-list surface is unavailable or not ready; saved listings were preserved.");
+      }
+      const cards = snapshot.sellingCards;
+      const completion = snapshot.completion;
+      if (!cards || !completion || completion.state !== "complete" || completion.expectedCount === null ||
+        completion.expectedCount !== completion.observedCount || completion.observedCount !== cards.length) {
+        throw new ScrapeFailedError("The selling-list count is missing, incomplete, or inconsistent; saved listings were preserved.");
+      }
+      const syncedAt = this.now().toISOString();
+      const listings = parseSellingCards(cards, new Date(syncedAt));
+      await this.store.setListingsSync(userId, listings, syncedAt);
+      return listings;
   }
 
   /**
@@ -92,48 +128,58 @@ export class ScrapeService {
    * files (and the video, attempted) downloaded into the archive.
    */
   async recoverListing(userId: string, listingId: string): Promise<StoredClone> {
+    return withUserOperation(this.browser, userId, () => this.recoverListingUnsafe(userId, listingId));
+  }
+
+  private async recoverListingUnsafe(userId: string, listingId: string): Promise<StoredClone> {
     const synced = this.store.getListings(userId);
     if (!synced.some((listing) => listing.id === listingId)) {
       throw new ListingNotSyncedError(listingId);
     }
     await this.requireConnected(userId);
 
-    const editStep1 = await this.browser.collectSnapshotAt(userId, editListingUrl(listingId));
-    let editStep2: PageSnapshot | null = null;
-    const editData = editStep1 ? parseEditForm(editStep1, null) : null;
-    if (editData && !editData.step2Blocked) {
+      const editStep1 = await this.browser.collectSnapshotAt(userId, editListingUrl(listingId));
+      if (editStep1 && !isExpectedPage(editStep1, "edit_form", listingId)) {
+        throw new ScrapeFailedError("The edit surface did not match the requested listing; saved recovery was preserved.");
+      }
+      let editStep2: PageSnapshot | null = null;
+      const editData = editStep1 ? parseEditForm(editStep1, null) : null;
+      if (editData && !editData.step2Blocked) {
       // Step 2 (location/delivery) only exists after Step 1's Next. An
       // empty required field disables Next (the Hot Wheels quirk) — then
       // Step 2 is simply never read and its fields fall back / go missing.
-      const advanced = await this.browser.advanceWizard(userId);
-      if (advanced) {
-        editStep2 = await this.browser.collectCurrentSnapshot(userId);
+        const advanced = await this.browser.advanceWizard(userId);
+        if (advanced) {
+          editStep2 = await this.browser.collectCurrentSnapshot(userId);
+          if (editStep2 && !isExpectedPage(editStep2, "edit_form", listingId)) {
+            throw new ScrapeFailedError("The Step 2 surface did not match the requested listing; saved recovery was preserved.");
+          }
+        }
       }
-    }
 
-    const listingSnapshot = await this.browser.collectSnapshotAt(userId, listingPageUrl(listingId));
-    if (!listingSnapshot) {
-      throw new ScrapeFailedError("The listing page could not be read.");
-    }
+      const listingSnapshot = await this.browser.collectSnapshotAt(userId, listingPageUrl(listingId));
+      if (!listingSnapshot || !isExpectedPage(listingSnapshot, "listing", listingId)) {
+        throw new ScrapeFailedError("The verified listing surface did not match the requested listing; saved recovery was preserved.");
+      }
 
-    const archive = new FileArchive(archiveDirFor(this.dataDir, userId, listingId));
-    const recovery = await recoverCloneData(
+      const archive = new FileArchive(archiveDirFor(this.dataDir, userId, listingId));
+      const recovery = await recoverCloneData(
       listingId,
       { editStep1, editStep2, listing: listingSnapshot },
       this.downloader,
       archive,
       this.now(),
-    );
+      );
 
-    const existing = this.store.getClone(userId, listingId);
-    const record: StoredClone = {
+      const existing = this.store.getClone(userId, listingId);
+      const record: StoredClone = {
       recovery,
       picks: existing ? existing.picks : {},
       edits: existing ? existing.edits : {},
       photoSelection: existing ? existing.photoSelection : null,
       updatedAt: this.now().toISOString(),
-    };
-    await this.store.saveClone(userId, listingId, record);
-    return record;
+      };
+      await this.store.saveClone(userId, listingId, record);
+      return record;
   }
 }

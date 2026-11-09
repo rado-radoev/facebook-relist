@@ -9,19 +9,27 @@
 /** Where a recovered value came from, in the verified recovery order. */
 export type FieldSource = "edit_form" | "listing_details";
 
+export type FieldState = "recovered" | "missing" | "unknown" | "not_applicable";
+
 export interface FieldResult<T> {
   value: T | null;
   source: FieldSource | null;
-  /** Set when value is null: why recovery could not get this field. */
+  /** State is additive for stored Sprint 2 records; new recoveries always set it. */
+  state?: FieldState;
+  /** Human-readable provenance or the reason it remains unavailable. */
   reason: string | null;
 }
 
 export function recovered<T>(value: T, source: FieldSource): FieldResult<T> {
-  return { value, source, reason: null };
+  return { value, source, state: "recovered", reason: null };
 }
 
 export function missing<T>(reason: string): FieldResult<T> {
-  return { value: null, source: null, reason };
+  return { value: null, source: null, state: "missing", reason };
+}
+
+export function unknown<T>(reason: string): FieldResult<T> {
+  return { value: null, source: null, state: "unknown", reason };
 }
 
 /** One listing as synced from the person's own selling list. */
@@ -43,9 +51,10 @@ export interface SyncedListing {
 }
 
 export interface MeetupPrefs {
-  public: boolean;
-  doorPickup: boolean;
-  doorDropoff: boolean;
+  /** null means this option was not observed, not unchecked. */
+  public: boolean | null;
+  doorPickup: boolean | null;
+  doorDropoff: boolean | null;
 }
 
 export interface DeliveryInfo {
@@ -56,23 +65,26 @@ export interface DeliveryInfo {
   meetup: MeetupPrefs | null;
 }
 
-export type VideoState = "none" | "recovered" | "present_not_downloaded";
+export type VideoState = "none" | "recovered" | "present_not_downloaded" | "unknown";
 
 export interface PhotoRecovery {
-  /** Every photo URL the listing page exposed, in original order. */
+  /** Every photo URL in stable gallery order; never deduped by position. */
   urls: string[];
-  /** Archive file names (under the user's archive dir), parallel to urls;
-   *  null where the download failed. */
+  /** Immutable content-addressed archive ids; null when validation/download failed. */
   files: Array<string | null>;
   downloaded: number;
+  /** Positive count evidence, null when Facebook did not expose a total. */
+  expectedCount?: number | null;
+  complete?: boolean;
+  identities?: string[];
+  reasons?: Array<string | null>;
 }
 
 export interface VideoRecovery {
-  present: boolean;
+  present: boolean | null;
   state: VideoState;
-  /** Archive file name when the video file itself was downloaded. */
+  /** Immutable archive id only for a validated, supported video. */
   file: string | null;
-  /** Set when the video is present but was not downloaded: why. */
   reason: string | null;
 }
 

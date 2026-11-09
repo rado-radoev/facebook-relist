@@ -1,22 +1,19 @@
 # Relist — Facebook Marketplace listing recreator
 
-An iPhone-first PWA that recreates your own Facebook Marketplace listings
-like-for-like: it downloads everything from the old listing (all photos,
-title, price, description, stored category, condition, location, delivery),
-creates a brand-new copy, waits for Facebook's review, and only then deletes
-the old listing.
+An experimental, offline-tested scaffold for reviewing and preparing a
+Facebook Marketplace listing copy. It is not currently authorized to create
+or delete Facebook listings. The live Facebook DOM, gallery completeness,
+photo uploads, category/shipping/video flows, and replacement verification
+remain unverified; see `docs/remediation-status.md` before using it.
 
-> **This branch (`build/sprint-3`) is Sprint 3: the recreate job
-> (create → watch → delete), built safeguard-first.** The job walks the
-> §3 order as a persistent state machine and deletes the old listing
-> only after the new one is confirmed live. **Dry-run is the default**
-> (`RELIST_DRY_RUN`): a dry-run job walks every step but stops before
-> posting and before deleting, so it cannot change anything on
-> Facebook. **Live verification against real Facebook is still
-> pending** — no backend profile has a real Facebook login yet, so the
-> job is verified against a fake driver and fixture snapshots, not
-> against Facebook itself (see "Sprint 3" below). The real-iPhone,
-> owner-present first real recreate is Sprint 4.
+> **Safety gate:** production Facebook create/delete are hard-disabled in
+> the real driver. `RELIST_DRY_RUN=0`, restored jobs, API payloads, and UI
+> state cannot enable them. Dry-run skips production browser create/delete
+> actions; simulated job progress is exercised only with injected fake
+> drivers. This is not evidence that a real recreate works. Live use also
+> requires resolving the credential-relay policy and separately reviewed
+> Facebook-readiness evidence. No deployment or live Facebook requests are
+> part of this branch.
 
 ## Sprint 1 — backend foundation
 
@@ -35,9 +32,10 @@ What works now:
 - **Connect Facebook** — starts that user's browser on Facebook's own
   login page. The app shows a **live remote view** (screenshots streamed
   over a WebSocket) and forwards taps and keystrokes into Facebook's page,
-  so the person types their credentials into facebook.com itself and does
-  their own 2FA/checkpoint. **No Relist form or endpoint ever receives a
-  Facebook password.** Login completion is detected from Facebook's
+  so the person types into Facebook's page and does their own
+  2FA/checkpoint. **This is a credential relay:** typed input passes through
+  Relist frontend and server memory before reaching Facebook. It is not
+  technical non-receipt, and consent does not change that fact. Login completion is detected from Facebook's
   `c_user` cookie; the profile persists on the server.
 - **Session states** — `not_connected` / `login_in_progress` / `connected`
   / `needs_check` / `expired`, served by the API and reflected live in the
@@ -65,7 +63,8 @@ What works now:
   no row is display-only. (Photo edits are session-only in this seed UI;
   from Sprint 2 the backend archive persists them like the other
   picks/edits.)
-- **Condition recovery order (verified live 2026-11-09, for Sprint 2):**
+- **Condition recovery order (reported from a prior manual spike; not
+  independently verified by the integrated collector):**
   edit form → buyer-facing listing page's **Details** section (it shows
   "Condition — Used - like new" when the listing has one) → ask with
   options. The Hot Wheels listing has no condition anywhere on Facebook —
@@ -73,13 +72,9 @@ What works now:
   about your item's condition" — so for it, asking is the correct last
   step, which the picker above handles.
 
-Verified: 30 Vitest tests (auth, session-state detection, store,
-per-user isolation, API behaviour) plus a live end-to-end run on
-2026-11-09 — a throwaway app user registered, connected, received real
-screenshots of the actual facebook.com login page, and dummy text typed
-through the remote view landed in Facebook's own email field (archived
-frames: `server/scripts/e2e-frame-*.jpg`, regenerable any time with
-`server/scripts/e2e-live.mjs`).
+Historical test counts and Facebook-facing scripts are not evidence of
+current live integration. The legacy Facebook-facing E2E must not be run;
+offline tests use synthetic data and injected browser/driver transports.
 
 Not built yet:
 
@@ -224,18 +219,16 @@ never just in the UI.
   (creation, each poll, guard decisions, delete, verification),
   visible in the job API and the Progress screen's data.
 
-**Dry-run — the default, and what it means:**
+- **Dry-run — default; not a live preview:**
 
 - `RELIST_DRY_RUN` unset (or anything but `0`) = **dry-run ON**. A
   job created in dry-run mode is marked `dryRun` permanently.
-- A dry-run job walks **every** step against the browser — the create
-  form is filled, the delete flow is opened — but stops **before the
-  create submit** and **before the delete confirm**, records what it
-  *would* have done in the audit log, simulates the watch/verify
-  steps (there is no real new listing to poll), and records **no
-  history entry**. It can never change anything on Facebook.
-- Real writes require `RELIST_DRY_RUN=0` explicitly, at server level —
-  there is no per-request or per-job way to escalate a dry-run job.
+- The production Facebook driver returns before browser create/delete
+  interaction in dry-run mode. It does not fill a form or open a Delete
+  menu. State-machine walkthroughs are tested with injected fake drivers;
+  they are simulated and do not prove production Facebook behavior.
+- `RELIST_DRY_RUN=0` cannot enable writes. The production mutation release
+  gate is a separate hard-coded false gate.
 - Prove it any time with the fake-driver smoke check:
   `cd server && npx tsx scripts/dry-run-smoke.ts` (6 checks: job is
   dry-run by default, walks to done, the driver only ever receives
@@ -295,8 +288,9 @@ Backend config is via env (see `server/.env.example`): `PORT`, `HOST`,
 (`BROWSER_PROXY`, `BROWSER_IGNORE_CERT_ERRORS`) that should stay unset on
 the home server.
 
-Tests: `npm run server:test` from the repo root (or `npm test` in
-`server/`).
+Tests: `npm ci && npm ci --prefix server`, then `npm run server:test`,
+`npm run server:typecheck`, and `npm run build` from the repo root. Keep
+development servers bound to loopback and do not expose Vite/Vitest.
 
 ## Household accounts — one signed-in person per device
 
@@ -309,9 +303,11 @@ switcher, by design**:
   and history — there is no cross-account view, no admin, and no way to open
   anyone else's account from your phone.
 - **Own Facebook login per person.** Each person connects their own
-  Facebook account, typing their credentials into **Facebook's own login
-  page** in the app's backend browser — the app never sees or stores
-  anyone's password. A text-message code approval on their own phone is
+  Facebook account, typing credentials into Facebook's login page in the
+  app's backend browser. This relays typed input through Relist frontend
+  and server memory. The original owner's absolute password non-receipt
+  requirement is unresolved; this architecture does not satisfy it. A
+  text-message code approval on their own phone is
   part of that login.
 - **The backend derives the account from the authenticated Relist session
   on every request.** It never accepts an account id from the client, so a
@@ -441,14 +437,23 @@ with `photoCount` / `category` / `delivery` in the seed are the ones
 verified live on 2026-11-09, and they are also the two fixture cases the
 Sprint 2 extraction tests are built from.
 
-## Deploy to Vercel later
+## Deployment boundary (not deployed or live-verified)
 
-The phone UI is a static Vite build, so moving it to Vercel needs no code
-changes:
+Do not deploy the static UI separately and assume CORS is sufficient. The
+browser API uses same-origin paths/cookies and remote control uses WebSockets;
+an unrelated frontend/backend origin has cookie/SameSite and HTTPS/WSS
+constraints. A deployment, if later approved, should use one HTTPS origin
+with a reverse proxy routing `/api` and WebSocket traffic to a private backend.
+Keep the backend and Vite/Vitest services off public interfaces. Use private
+TLS/access networking, dedicated unprivileged runtime, private data/profile
+directories and permissions, and tested encrypted backups with a documented
+retention/restore policy. A host operator can access browser profile/session
+material; filesystem permissions do not remove that trust boundary.
 
-1. `npm run build` — output lands in `dist/`.
-2. Either import this repo in Vercel (framework preset: **Vite**, build
-   command `npm run build`, output directory `dist`), or run `vercel deploy`
-   from the repo root.
-3. The Facebook-facing backend stays on the home server; only this static UI
-   moves to Vercel.
+1. For offline local UI builds, run `npm ci` then `npm run build`; output is
+   written to `dist/`.
+2. No deployment is configured or verified by this project. Choose and test
+   a same-origin HTTPS reverse proxy/private-network design before exposing
+   authentication or browser-control routes.
+3. PWA metadata exists, but there is no verified offline application/data
+   mode. Sensitive API/browser content must not be cached by a service worker.

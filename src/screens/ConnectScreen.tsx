@@ -11,7 +11,7 @@ interface Props {
 
 const STEPS: string[] = [
   "Tap “Open Facebook login” and Relist opens Facebook's login page in its backend browser, on your home server.",
-  "Log in on Facebook's own page — you type into Facebook itself, in the live view below. Relist never sees your password.",
+  "Log in on Facebook's own page in the live view. Password and code characters pass through Relist's frontend and backend memory before the backend browser sends them to Facebook; this UI clears typed text and does not intentionally save it. Use this flow only if you trust the Relist server.",
   "Approve the text-message code on your phone if Facebook asks.",
   "When Facebook lets you in, this screen shows Connected and your listings appear — only yours.",
 ];

@@ -1,6 +1,7 @@
 import { mkdtemp, rm, stat } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { execFileSync } from "node:child_process";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { buildApp, type AppParts } from "./app.js";
 import type { BrowserHandle, ContextLike, PageLike } from "./browserManager.js";
@@ -50,6 +51,7 @@ function makeFakeHandle(): BrowserHandle {
         return null;
       }
       if (launch !== FIXTURE_LAUNCH) {
+        const isSellingList = currentUrl.includes("/marketplace/you/selling");
         const empty: PageSnapshot = {
           url: currentUrl,
           text: "",
@@ -58,6 +60,12 @@ function makeFakeHandle(): BrowserHandle {
           sellingCards: [],
           detailRows: [],
           form: { inputs: [], selects: [], checkboxes: [], switches: [], buttons: [] },
+          surface: {
+            kind: isSellingList ? "selling_list" : "unknown",
+            listingId: null,
+            readiness: "ready",
+          },
+          ...(isSellingList ? { completion: { state: "complete", expectedCount: 0, observedCount: 0 } } : {}),
         };
         return empty;
       }
@@ -78,7 +86,9 @@ function makeFakeHandle(): BrowserHandle {
   return { context, page };
 }
 
-const fakeDownloader = async (url: string): Promise<Buffer> => Buffer.from(`bytes:${url}`);
+const VALID_JPEG = Buffer.from("/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAP//////////////////////////////////////////////////////////////////////////////////////2wBDAf//////////////////////////////////////////////////////////////////////////////////////wAARCAABAAEDASIAAhEBAxEB/8QAFQABAQAAAAAAAAAAAAAAAAAAAAf/xAAUEAEAAAAAAAAAAAAAAAAAAAAA/9oADAMBAAIQAxAAAAH/AP/EABQQAQAAAAAAAAAAAAAAAAAAAAD/2gAIAQMBAT8BP//EABQQAQAAAAAAAAAAAAAAAAAAAAD/2gAIAQIBAT8BP//Z", "base64");
+const VALID_MP4 = execFileSync("ffmpeg", ["-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i", "color=c=black:s=16x16:d=0.1", "-an", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-movflags", "+frag_keyframe+empty_moov", "-f", "mp4", "pipe:1"]);
+const fakeDownloader = async (url: string): Promise<Buffer> => Buffer.from(url.includes("video") ? VALID_MP4 : VALID_JPEG);
 
 let dataDir: string;
 let parts: AppParts;
@@ -126,7 +136,7 @@ async function connect(cookie: string): Promise<void> {
   const res = await parts.app.inject({
     method: "POST",
     url: "/api/facebook/connect",
-    headers: { cookie },
+    headers: { cookie, origin: "http://localhost:5173" },
   });
   expect(res.statusCode).toBe(200);
 }
@@ -149,7 +159,7 @@ describe("listings sync + clone recovery API", () => {
     const sync = await parts.app.inject({
       method: "POST",
       url: "/api/listings/sync",
-      headers: { cookie: cookieC },
+      headers: { cookie: cookieC, origin: "http://localhost:5173" },
     });
     expect(sync.statusCode).toBe(409);
   });
@@ -163,28 +173,57 @@ describe("listings sync + clone recovery API", () => {
     const before = await parts.app.inject({
       method: "GET",
       url: "/api/listings",
-      headers: { cookie: cookieA },
+      headers: { cookie: cookieA, origin: "http://localhost:5173" },
     });
     expect(before.json().listings).toEqual([]);
 
     const sync = await parts.app.inject({
       method: "POST",
       url: "/api/listings/sync",
-      headers: { cookie: cookieA },
+      headers: { cookie: cookieA, origin: "http://localhost:5173" },
     });
     expect(sync.statusCode).toBe(200);
-    const listings = sync.json().listings as Array<Record<string, unknown>>;
+    const listings = sync.json().listings as import("./cloneTypes.js").SyncedListing[];
     expect(listings).toHaveLength(2);
     expect(listings[0].id).toBe(HOT_WHEELS_ID);
     expect(listings[1].id).toBe(SWITCHES_ID);
     expect(sync.json().syncedAt).toBeTruthy();
+
+    let releaseOperation!: () => void;
+    let operationStarted!: () => void;
+    const started = new Promise<void>((resolve) => { operationStarted = resolve; });
+    const hold = new Promise<void>((resolve) => { releaseOperation = resolve; });
+    const activeOperation = parts.browser.withUserOperation(userAId, async () => {
+      operationStarted();
+      await hold;
+    });
+    await started;
+    let syncFinished = false;
+    const queuedSync = parts.scraper.syncListings(userAId).then(() => { syncFinished = true; });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(syncFinished).toBe(false);
+    releaseOperation();
+    await activeOperation;
+    await queuedSync;
+    expect(syncFinished).toBe(true);
+
+    const emptySyncedAt = "2026-11-09T12:00:00.000Z";
+    await parts.store.setListingsSync(userAId, [], emptySyncedAt);
+    const res = await parts.app.inject({
+      method: "GET",
+      url: "/api/listings",
+      headers: { cookie: cookieA, origin: "http://localhost:5173" },
+    });
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toEqual({ listings: [], syncedAt: emptySyncedAt });
+    await parts.store.setListingsSync(userAId, listings, sync.json().syncedAt as string);
   });
 
   it("recovers the full clone for a synced listing, archiving the photo files", async () => {
     const res = await parts.app.inject({
       method: "POST",
       url: `/api/listings/${SWITCHES_ID}/clone/recover`,
-      headers: { cookie: cookieA },
+      headers: { cookie: cookieA, origin: "http://localhost:5173" },
     });
     expect(res.statusCode).toBe(200);
     const clone = res.json().clone as Record<string, any>;
@@ -199,7 +238,7 @@ describe("listings sync + clone recovery API", () => {
       "archive",
       userAId,
       SWITCHES_ID,
-      "photo-1.jpg",
+      clone.recovery.photos.files[0],
     );
     const info = await stat(photoPath);
     expect(info.size).toBeGreaterThan(0);
@@ -207,7 +246,7 @@ describe("listings sync + clone recovery API", () => {
     const photoRes = await parts.app.inject({
       method: "GET",
       url: `/api/listings/${SWITCHES_ID}/photos/0`,
-      headers: { cookie: cookieA },
+      headers: { cookie: cookieA, origin: "http://localhost:5173" },
     });
     expect(photoRes.statusCode).toBe(200);
     expect(photoRes.headers["content-type"]).toContain("image/jpeg");
@@ -217,7 +256,7 @@ describe("listings sync + clone recovery API", () => {
     const res = await parts.app.inject({
       method: "POST",
       url: `/api/listings/${HOT_WHEELS_ID}/clone/recover`,
-      headers: { cookie: cookieA },
+      headers: { cookie: cookieA, origin: "http://localhost:5173" },
     });
     expect(res.statusCode).toBe(200);
     const clone = res.json().clone as Record<string, any>;
@@ -232,7 +271,7 @@ describe("listings sync + clone recovery API", () => {
     const put = await parts.app.inject({
       method: "PUT",
       url: `/api/listings/${HOT_WHEELS_ID}/clone/picks`,
-      headers: { cookie: cookieA },
+      headers: { cookie: cookieA, origin: "http://localhost:5173" },
       payload: {
         picks: { condition: "Used - Like New" },
         edits: { price: "$28" },
@@ -244,7 +283,7 @@ describe("listings sync + clone recovery API", () => {
     const get = await parts.app.inject({
       method: "GET",
       url: `/api/listings/${HOT_WHEELS_ID}/clone`,
-      headers: { cookie: cookieA },
+      headers: { cookie: cookieA, origin: "http://localhost:5173" },
     });
     expect(get.statusCode).toBe(200);
     expect(get.json().clone.picks).toEqual({ condition: "Used - Like New" });
@@ -259,7 +298,7 @@ describe("listings sync + clone recovery API", () => {
     const syncB = await parts.app.inject({
       method: "POST",
       url: "/api/listings/sync",
-      headers: { cookie: cookieB },
+      headers: { cookie: cookieB, origin: "http://localhost:5173" },
     });
     expect(syncB.statusCode).toBe(200);
     expect(syncB.json().listings).toEqual([]);
@@ -267,21 +306,21 @@ describe("listings sync + clone recovery API", () => {
     const recover = await parts.app.inject({
       method: "POST",
       url: `/api/listings/${SWITCHES_ID}/clone/recover`,
-      headers: { cookie: cookieB },
+      headers: { cookie: cookieB, origin: "http://localhost:5173" },
     });
     expect(recover.statusCode).toBe(404);
 
     const clone = await parts.app.inject({
       method: "GET",
       url: `/api/listings/${SWITCHES_ID}/clone`,
-      headers: { cookie: cookieB },
+      headers: { cookie: cookieB, origin: "http://localhost:5173" },
     });
     expect(clone.statusCode).toBe(404);
 
     const picks = await parts.app.inject({
       method: "PUT",
       url: `/api/listings/${SWITCHES_ID}/clone/picks`,
-      headers: { cookie: cookieB },
+      headers: { cookie: cookieB, origin: "http://localhost:5173" },
       payload: { picks: { condition: "New" }, edits: {}, photoSelection: null },
     });
     expect(picks.statusCode).toBe(404);
@@ -289,7 +328,7 @@ describe("listings sync + clone recovery API", () => {
     const photo = await parts.app.inject({
       method: "GET",
       url: `/api/listings/${SWITCHES_ID}/photos/0`,
-      headers: { cookie: cookieB },
+      headers: { cookie: cookieB, origin: "http://localhost:5173" },
     });
     expect(photo.statusCode).toBe(404);
   });
@@ -298,7 +337,7 @@ describe("listings sync + clone recovery API", () => {
     const res = await parts.app.inject({
       method: "PUT",
       url: `/api/listings/${HOT_WHEELS_ID}/clone/picks`,
-      headers: { cookie: cookieA },
+      headers: { cookie: cookieA, origin: "http://localhost:5173" },
       payload: { picks: { accountId: "someone-else" }, edits: {}, photoSelection: null },
     });
     expect(res.statusCode).toBe(400);

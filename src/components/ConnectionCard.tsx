@@ -15,7 +15,9 @@ export default function ConnectionCard({ user, onConnect, onDisconnect }: Props)
         </div>
         <div className="connection-text">
           <p className="connection-title">Connect your Facebook account</p>
-          <p className="connection-sub">Log in on Facebook's own page — Relist never sees your password</p>
+          <p className="connection-sub">
+            Facebook login text is relayed through Relist's frontend and backend memory before reaching its browser; this UI does not intentionally save it.
+          </p>
         </div>
         <button type="button" className="connect-button" onClick={onConnect}>
           Connect Facebook

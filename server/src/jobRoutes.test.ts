@@ -1,4 +1,4 @@
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -25,6 +25,8 @@ const NEW_ID = "222";
 const POLL_MS = 15 * 60 * 1000;
 
 class FakeDriver implements MarketplaceDriver {
+  private approvedPayloadHash = "";
+
   async findPossibleDuplicate(): Promise<SyncedListing | null> {
     return null;
   }
@@ -46,12 +48,33 @@ class FakeDriver implements MarketplaceDriver {
     return "available";
   }
 
-  async listingStillListed(): Promise<boolean> {
+  async listingStillListed(): Promise<boolean | "unknown"> {
     return true;
   }
 
+  async checkOriginalUnchanged(): Promise<"unchanged" | "changed" | "unknown"> {
+    return "unchanged";
+  }
+
+  async verifyNewListing(
+    _userId: string,
+    listingId: string,
+    _url: string,
+    payloadHash: string,
+  ): Promise<{ state: "verified"; listingId: string; sellerMatchesOwner: true; payloadHash: string }> {
+    this.approvedPayloadHash = payloadHash;
+    return { state: "verified", listingId, sellerMatchesOwner: true, payloadHash };
+  }
+
   async verifyRecreate(): Promise<VerifyResult> {
-    return { oldGone: true, newListed: true };
+    return {
+      oldGone: true,
+      newListed: true,
+      complete: true,
+      newListingId: NEW_ID,
+      newSellerId: "owner-1",
+      newPayloadHash: this.approvedPayloadHash,
+    };
   }
 
   async deleteListing(
@@ -102,7 +125,16 @@ function completeClone(): StoredClone {
         { type: "Local pickup only", shipping: false, meetup: { public: false, doorPickup: false, doorDropoff: false } },
         "edit_form",
       ),
-      photos: { urls: ["https://cdn.example/a/photo-1.jpg"], files: ["photo-1.jpg"], downloaded: 1 },
+      photos: Object.assign({
+        urls: ["https://cdn.example/a/photo-1.jpg"],
+        files: ["photo-1.jpg"],
+        downloaded: 1,
+      }, {
+        complete: true,
+        expectedCount: 1,
+        identities: ["media-1"],
+        reasons: [null],
+      }),
       video: { present: false, state: "none", file: null, reason: null },
       step2Blocked: false,
     },
@@ -166,6 +198,9 @@ async function seedConnectedUser(cookie: string): Promise<string> {
   const me = await parts.app.inject({ method: "GET", url: "/api/auth/me", headers: { cookie } });
   const userId = me.json().user.id as string;
   await parts.store.setFacebookStatus(userId, "connected");
+  const mediaDir = path.join(dataDir, "archive", userId, OLD_ID);
+  await mkdir(mediaDir, { recursive: true });
+  await writeFile(path.join(mediaDir, "photo-1.jpg"), "generated fake image bytes");
   await parts.store.setListings(userId, [
     {
       id: OLD_ID,
@@ -198,7 +233,7 @@ describe("recreate job API", () => {
     const res = await parts.app.inject({
       method: "POST",
       url: `/api/listings/${OLD_ID}/jobs`,
-      headers: { cookie: cookieC },
+      headers: { cookie: cookieC, origin: "http://localhost:5173" },
     });
     expect(res.statusCode).toBe(409);
   });
@@ -210,7 +245,7 @@ describe("recreate job API", () => {
     const create = await parts.app.inject({
       method: "POST",
       url: `/api/listings/${OLD_ID}/jobs`,
-      headers: { cookie: cookieA },
+      headers: { cookie: cookieA, origin: "http://localhost:5173" },
     });
     expect(create.statusCode).toBe(201);
     const job = create.json().job as Record<string, any>;
@@ -226,7 +261,7 @@ describe("recreate job API", () => {
     const mid = await parts.app.inject({
       method: "GET",
       url: `/api/jobs/${jobId}`,
-      headers: { cookie: cookieA },
+      headers: { cookie: cookieA, origin: "http://localhost:5173" },
     });
     expect(mid.json().job.status).toBe("in_review");
     expect(mid.json().job.newListingId).toBe(NEW_ID);
@@ -236,35 +271,35 @@ describe("recreate job API", () => {
     const done = await parts.app.inject({
       method: "GET",
       url: `/api/jobs/${jobId}`,
-      headers: { cookie: cookieA },
+      headers: { cookie: cookieA, origin: "http://localhost:5173" },
     });
     expect(done.json().job.status).toBe("done");
 
     const history = await parts.app.inject({
       method: "GET",
       url: "/api/history",
-      headers: { cookie: cookieA },
+      headers: { cookie: cookieA, origin: "http://localhost:5173" },
     });
     expect(history.json().history).toHaveLength(1);
     expect(history.json().history[0].newListingId).toBe(NEW_ID);
   });
 
-  it("blocks a second job while one is active for the same user", async () => {
-    // Person A's first job is done, so free the lock check differently:
-    // start a job, then immediately try another for the same listing.
+  it("returns the same job for repeated requests for the same original listing", async () => {
+    const cookie = await registerUser("Person D", "d-jobs@example.com");
+    await seedConnectedUser(cookie);
     const first = await parts.app.inject({
       method: "POST",
       url: `/api/listings/${OLD_ID}/jobs`,
-      headers: { cookie: cookieA },
+      headers: { cookie, origin: "http://localhost:5173" },
     });
     expect(first.statusCode).toBe(201);
     const second = await parts.app.inject({
       method: "POST",
       url: `/api/listings/${OLD_ID}/jobs`,
-      headers: { cookie: cookieA },
+      headers: { cookie, origin: "http://localhost:5173" },
     });
-    expect(second.statusCode).toBe(409);
-    expect(second.json().jobId).toBe(first.json().job.id);
+    expect(second.statusCode).toBe(200);
+    expect(second.json().job.id).toBe(first.json().job.id);
   });
 
   it("returns 400 with the missing fields when the clone check is incomplete", async () => {
@@ -277,7 +312,7 @@ describe("recreate job API", () => {
     const res = await parts.app.inject({
       method: "POST",
       url: `/api/listings/${OLD_ID}/jobs`,
-      headers: { cookie: cookieB },
+      headers: { cookie: cookieB, origin: "http://localhost:5173" },
     });
     expect(res.statusCode).toBe(400);
     expect(res.json().missing).toEqual(["condition"]);
@@ -287,7 +322,7 @@ describe("recreate job API", () => {
     const res = await parts.app.inject({
       method: "POST",
       url: "/api/listings/999/jobs",
-      headers: { cookie: cookieB },
+      headers: { cookie: cookieB, origin: "http://localhost:5173" },
     });
     expect(res.statusCode).toBe(404);
   });
@@ -296,21 +331,21 @@ describe("recreate job API", () => {
     const job = await parts.app.inject({
       method: "GET",
       url: `/api/jobs/${jobId}`,
-      headers: { cookie: cookieB },
+      headers: { cookie: cookieB, origin: "http://localhost:5173" },
     });
     expect(job.statusCode).toBe(404);
 
     const list = await parts.app.inject({
       method: "GET",
       url: "/api/jobs",
-      headers: { cookie: cookieB },
+      headers: { cookie: cookieB, origin: "http://localhost:5173" },
     });
     expect(list.json().jobs).toEqual([]);
 
     const history = await parts.app.inject({
       method: "GET",
       url: "/api/history",
-      headers: { cookie: cookieB },
+      headers: { cookie: cookieB, origin: "http://localhost:5173" },
     });
     expect(history.json().history).toEqual([]);
   });

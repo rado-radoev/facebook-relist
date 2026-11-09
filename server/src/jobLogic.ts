@@ -6,6 +6,7 @@
 // selling-list card look like the copy we already created? is the new
 // listing actually live?) are unit-testable without Facebook.
 
+import path from "node:path";
 import type { DeliveryInfo, StoredClone, SyncedListing } from "./cloneTypes.js";
 import type { CloneJobData } from "./jobTypes.js";
 import type { PageSnapshot } from "./snapshot.js";
@@ -63,11 +64,26 @@ export function resolveJobData(clone: StoredClone): ResolvedJobData {
     pickValue: string | undefined,
   ): string | null {
     const edit = edits[field];
-    if (edit && edit.trim().length > 0) {
+    if (edit !== undefined) {
       supplied.add(field);
-      return edit;
+      if (edit.trim().length > 0 || field === "description") {
+        return edit;
+      }
+      missing.push(field);
+      return null;
     }
-    if (recoveredValue) {
+    const result = (recovery as NonNullable<typeof recovery>)[field] as {
+      state?: "recovered" | "missing" | "unknown" | "not_applicable";
+    };
+    if (result.state !== undefined && result.state !== "recovered") {
+      if (pickValue && pickValue.trim().length > 0) {
+        supplied.add(field);
+        return pickValue;
+      }
+      missing.push(field);
+      return null;
+    }
+    if (recoveredValue !== null && recoveredValue.trim().length > 0) {
       return recoveredValue;
     }
     if (pickValue && pickValue.trim().length > 0) {
@@ -85,8 +101,8 @@ export function resolveJobData(clone: StoredClone): ResolvedJobData {
   const condition = resolveText("condition", recovery.condition.value, picks.condition);
   const location = resolveText("location", recovery.location.value, undefined);
 
-  // Delivery: the recovered value is a DeliveryInfo; a pick or edit only
-  // ever carries the delivery type label, so those replace just the type.
+  // Delivery flags are independent clone fields. A type pick cannot
+  // silently stand in for unread shipping or meetup options.
   let delivery: DeliveryInfo | null = recovery.delivery.value;
   const deliveryEdit = edits.delivery;
   const deliveryPick = picks.delivery;
@@ -94,56 +110,121 @@ export function resolveJobData(clone: StoredClone): ResolvedJobData {
     supplied.add("delivery");
     delivery = {
       type: deliveryEdit,
-      shipping: delivery ? delivery.shipping : null,
-      meetup: delivery ? delivery.meetup : null,
+      shipping: delivery?.shipping ?? null,
+      meetup: delivery?.meetup ?? null,
     };
-  } else if (!delivery || !delivery.type) {
-    if (deliveryPick && deliveryPick.trim().length > 0) {
-      supplied.add("delivery");
-      delivery = {
-        type: deliveryPick,
-        shipping: delivery ? delivery.shipping : null,
-        meetup: delivery ? delivery.meetup : null,
-      };
-    }
+  } else if (!delivery?.type && deliveryPick && deliveryPick.trim().length > 0) {
+    supplied.add("delivery");
+    delivery = {
+      type: deliveryPick,
+      shipping: delivery?.shipping ?? null,
+      meetup: delivery?.meetup ?? null,
+    };
   }
-  if (!delivery || !delivery.type) {
-    missing.push("delivery");
-    delivery = null;
+  if (!delivery?.type) {
+    missing.push("delivery.type");
+  }
+  if (typeof delivery?.shipping !== "boolean") {
+    missing.push("delivery.shipping");
+  }
+  const meetup = delivery?.meetup;
+  if (
+    !meetup ||
+    typeof meetup.public !== "boolean" ||
+    typeof meetup.doorPickup !== "boolean" ||
+    typeof meetup.doorDropoff !== "boolean"
+  ) {
+    missing.push("delivery.meetup");
   }
 
-  // Attributes: recovered record, replaced wholesale when edited.
-  let attributes = recovery.attributes.value ?? {};
+  // An absent attributes object is not proof that the listing had no
+  // attributes. Empty recovered {} is accepted only as explicit evidence.
+  let attributes = recovery.attributes.value;
   const attributesEdit = edits.attributes;
-  if (attributesEdit && attributesEdit.trim().length > 0) {
+  if (attributesEdit !== undefined) {
     supplied.add("attributes");
     attributes = parseAttributesText(attributesEdit);
   }
+  const attributeState = (recovery.attributes as typeof recovery.attributes & {
+    state?: "recovered" | "missing" | "unknown" | "not_applicable";
+  }).state;
+  if (attributes === null || (attributeState !== undefined && attributeState !== "recovered" && attributesEdit === undefined)) {
+    missing.push("attributes");
+    attributes = {};
+  }
 
-  // Photos: the person's selection (archive file names) when they edited
-  // it, else every photo that actually downloaded — in original order.
-  // A slot whose download failed can never be part of a job.
+  // A user photo selection is explicit consent to omit unselected slots;
+  // without one every recovered slot must be present. Never resolve a
+  // supplied filename by basename or silently shift a failed slot.
   const selection = clone.photoSelection;
+  const photoEvidence = recovery.photos as typeof recovery.photos & {
+    complete?: boolean;
+    expectedCount?: number | null;
+    identities?: string[];
+    reasons?: Array<string | null>;
+  };
+  const failedPhotoSlot = recovery.photos.files.some((file) => file === null) ||
+    (photoEvidence.reasons?.some((reason) => reason !== null) ?? false);
+  if (
+    !Array.isArray(recovery.photos.files) ||
+    !Array.isArray(recovery.photos.urls) ||
+    photoEvidence.complete !== true ||
+    !Number.isInteger(photoEvidence.expectedCount) ||
+    photoEvidence.expectedCount !== recovery.photos.files.length ||
+    !Array.isArray(photoEvidence.identities) ||
+    photoEvidence.identities.length !== recovery.photos.files.length ||
+    new Set(photoEvidence.identities).size !== photoEvidence.identities.length ||
+    (photoEvidence.reasons !== undefined && photoEvidence.reasons.length !== recovery.photos.files.length) ||
+    failedPhotoSlot ||
+    recovery.photos.files.length !== recovery.photos.urls.length ||
+    !Number.isInteger(recovery.photos.downloaded) ||
+    recovery.photos.downloaded !== recovery.photos.files.filter((file) => typeof file === "string" && file.length > 0).length
+  ) {
+    missing.push("photos");
+  }
   const photoFiles: string[] = [];
   const photoUrls: string[] = [];
+  const photosByFile = new Map<string, string>();
   for (const [index, fileName] of recovery.photos.files.entries()) {
-    if (!fileName) {
-      continue;
+    const url = recovery.photos.urls[index];
+    if (fileName && url && path.basename(fileName) === fileName) {
+      photosByFile.set(fileName, url);
+      if (!selection) {
+        photoFiles.push(fileName);
+        photoUrls.push(url);
+      }
+    } else if (!selection) {
+      missing.push("photos");
     }
-    if (selection && !selection.includes(fileName)) {
-      continue;
-    }
-    photoFiles.push(fileName);
-    photoUrls.push(recovery.photos.urls[index] ?? "");
   }
   if (selection) {
     supplied.add("photos");
+    if (new Set(selection).size !== selection.length || selection.some((file) => !photosByFile.has(file))) {
+      missing.push("photos");
+    } else {
+      for (const fileName of selection) {
+        photoFiles.push(fileName);
+        photoUrls.push(photosByFile.get(fileName) as string);
+      }
+    }
   }
   if (photoFiles.length === 0) {
     missing.push("photos");
   }
 
+  if (typeof recovery.video.present !== "boolean") {
+    missing.push("video");
+  }
+  if (recovery.video.present && recovery.video.state !== "recovered") {
+    missing.push("video");
+  }
+  if (!recovery.video.present && recovery.video.state !== "none") {
+    missing.push("video");
+  }
   const videoFile = recovery.video.state === "recovered" ? recovery.video.file : null;
+  if (recovery.video.state === "recovered" && !videoFile) {
+    missing.push("video");
+  }
 
   if (missing.length > 0) {
     return { data: null, missing, suppliedFields: [...supplied] };
@@ -227,7 +308,7 @@ export function fingerprintString(fp: ListingFingerprint): string {
 export function matchesFingerprint(
   card: SyncedListing,
   fp: ListingFingerprint,
-  todayIsoDate: string,
+  _todayIsoDate: string,
 ): boolean {
   if (card.id === fp.listingId) {
     return false;
@@ -238,13 +319,7 @@ export function matchesFingerprint(
   if (normalizePriceKey(card.price) !== fp.price) {
     return false;
   }
-  if (fp.photoKey && photoKeyOf(card.photoUrl) === fp.photoKey) {
-    return true;
-  }
-  // Photo signal unavailable or rotated by Facebook: a same-day listing
-  // with the same title and price is still treated as a possible copy —
-  // pausing to adopt it is safer than posting a duplicate.
-  return card.listedDate === todayIsoDate;
+  return Boolean(fp.photoKey) && photoKeyOf(card.photoUrl) === fp.photoKey;
 }
 
 // ---------------------------------------------------------------------------
@@ -278,7 +353,25 @@ const SELLER_LIVE_BUTTONS = ["mark as sold", "mark as pending", "edit listing"];
  * still-in-review; a dead page means gone; anything else is honestly
  * "unknown" and the watch step keeps polling.
  */
-export function interpretListingAvailability(snapshot: PageSnapshot): ListingAvailability {
+export function interpretListingAvailability(
+  snapshot: PageSnapshot,
+  expectedListingId: string,
+): ListingAvailability {
+  let actual: URL;
+  try {
+    actual = new URL(snapshot.url);
+  } catch {
+    return "unknown";
+  }
+  if (
+    actual.protocol !== "https:" ||
+    !["facebook.com", "www.facebook.com"].includes(actual.hostname) ||
+    actual.pathname !== `/marketplace/item/${expectedListingId}` ||
+    actual.search !== "" ||
+    actual.hash !== ""
+  ) {
+    return "unknown";
+  }
   const text = snapshot.text.toLowerCase();
   for (const marker of GONE_MARKERS) {
     if (text.includes(marker)) {
@@ -295,10 +388,6 @@ export function interpretListingAvailability(snapshot: PageSnapshot): ListingAva
     if (buttons.some((label) => label === live || label.startsWith(live))) {
       return "available";
     }
-  }
-  // A buyer-visible listing page with details and a price is live.
-  if ((snapshot.detailRows ?? []).length > 0 && /\$\s?[0-9]/.test(snapshot.text)) {
-    return "available";
   }
   return "unknown";
 }

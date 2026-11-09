@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { hashPassword, verifyPassword } from "./passwords.js";
+import { hashPassword, needsPasswordRehash, verifyPassword } from "./passwords.js";
 
 describe("password hashing (scrypt)", () => {
   it("verifies a correct password against its hash", async () => {
@@ -17,6 +17,25 @@ describe("password hashing (scrypt)", () => {
     const first = await hashPassword("same password");
     const second = await hashPassword("same password");
     expect(first).not.toBe(second);
+  });
+
+  it("uses the measured stronger scrypt profile and bounds input length", async () => {
+    const stored = await hashPassword("synthetic-password");
+    expect(stored.split(":").slice(1, 4)).toEqual(["16384", "8", "5"]);
+    await expect(hashPassword("x".repeat(1025))).rejects.toThrow(/maximum/i);
+  });
+
+  it("identifies legacy parameters for rehash after a successful login", async () => {
+    const { scrypt } = await import("node:crypto");
+    const salt = Buffer.alloc(16, 7);
+    const legacyKey = await new Promise<Buffer>((resolve, reject) => {
+      scrypt("legacy-password", salt, 64, { N: 16384, r: 8, p: 1, maxmem: 64 * 1024 * 1024 }, (error, key) =>
+        error ? reject(error) : resolve(key as Buffer),
+      );
+    });
+    const legacy = ["scrypt", "16384", "8", "1", salt.toString("base64"), legacyKey.toString("base64")].join(":");
+    expect(await verifyPassword("legacy-password", legacy)).toBe(true);
+    expect(needsPasswordRehash(legacy)).toBe(true);
   });
 
   it("rejects malformed stored hashes instead of throwing", async () => {

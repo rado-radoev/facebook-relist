@@ -12,7 +12,7 @@
 // Run from server/:  npx tsx scripts/dry-run-smoke.ts
 // Exits non-zero if any check fails.
 
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { buildApp } from "../src/app.js";
@@ -45,11 +45,24 @@ const fakeDriver: MarketplaceDriver = {
   async checkListing(): Promise<ListingAvailability> {
     return "available";
   },
-  async listingStillListed(): Promise<boolean> {
+  async listingStillListed(): Promise<boolean | "unknown"> {
     return true;
   },
+  async checkOriginalUnchanged(): Promise<"unchanged"> {
+    return "unchanged";
+  },
+  async verifyNewListing(_userId, listingId, _url, payloadHash) {
+    return { state: "verified", listingId, sellerMatchesOwner: true, payloadHash };
+  },
   async verifyRecreate(): Promise<VerifyResult> {
-    return { oldGone: true, newListed: true };
+    return {
+      oldGone: true,
+      newListed: true,
+      complete: true,
+      newListingId: NEW_ID,
+      newSellerId: "owner-1",
+      newPayloadHash: "approved-hash",
+    };
   },
   async deleteListing(_userId, _listingId, options): Promise<DeleteOutcome> {
     driverCalls.push({ kind: "delete", dryRun: options.dryRun });
@@ -93,7 +106,16 @@ function completeClone(): StoredClone {
         { type: "Local pickup only", shipping: false, meetup: { public: false, doorPickup: false, doorDropoff: false } },
         "edit_form",
       ),
-      photos: { urls: ["https://cdn.example/a/photo-1.jpg"], files: ["photo-1.jpg"], downloaded: 1 },
+      photos: Object.assign({
+        urls: ["https://cdn.example/a/photo-1.jpg"],
+        files: ["photo-1.jpg"],
+        downloaded: 1,
+      }, {
+        complete: true,
+        expectedCount: 1,
+        identities: ["media-1"],
+        reasons: [null],
+      }),
       video: { present: false, state: "none", file: null, reason: null },
       step2Blocked: false,
     },
@@ -144,6 +166,9 @@ try {
   const me = await parts.app.inject({ method: "GET", url: "/api/auth/me", headers: { cookie } });
   const userId = me.json().user.id as string;
   await parts.store.setFacebookStatus(userId, "connected");
+  const mediaDir = path.join(dataDir, "archive", userId, OLD_ID);
+  await mkdir(mediaDir, { recursive: true });
+  await writeFile(path.join(mediaDir, "photo-1.jpg"), "generated fake image bytes");
   await parts.store.setListings(userId, [
     {
       id: OLD_ID,

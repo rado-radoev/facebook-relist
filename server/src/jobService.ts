@@ -21,7 +21,8 @@
 //  - Review stuck > 48h → stuck, alert set, old listing NOT deleted.
 //  - Every action lands in the job's audit log with a timestamp.
 
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
+import { readFile, realpath } from "node:fs/promises";
 import path from "node:path";
 import type { Store } from "./store.js";
 import type { MarketplaceDriver } from "./facebookDriver.js";
@@ -73,13 +74,54 @@ export interface JobServiceOptions {
   now?: () => Date;
   /** Jitter source for poll scheduling (0..1), injectable for tests. */
   random?: () => number;
+  /** Non-reentrant per-user coordinator; acquire once per whole job step. */
+  withUserOperation?: <T>(userId: string, operation: () => Promise<T>) => Promise<T>;
 }
 
 const MAX_STEPS_PER_RUN = 16;
 
+async function hashApprovedMedia(
+  dataDir: string,
+  userId: string,
+  listingId: string,
+  data: RecreateJob["data"],
+): Promise<{ photos: string[]; video: string | null }> {
+  const archiveDir = path.resolve(archiveDirFor(dataDir, userId, listingId));
+  const resolvedArchiveDir = await realpath(archiveDir);
+  const hashFile = async (fileName: string): Promise<string> => {
+    if (!fileName || path.basename(fileName) !== fileName) {
+      throw new Error("Media filename is not a safe archive-local name");
+    }
+    const candidate = path.resolve(resolvedArchiveDir, fileName);
+    const actualPath = await realpath(candidate);
+    if (!actualPath.startsWith(`${resolvedArchiveDir}${path.sep}`)) {
+      throw new Error("Media path escaped the listing archive");
+    }
+    const bytes = await readFile(actualPath);
+    return createHash("sha256").update(bytes).digest("hex");
+  };
+  const photos: string[] = [];
+  for (const fileName of data.photoFiles) {
+    photos.push(await hashFile(fileName));
+  }
+  const video = data.videoFile ? await hashFile(data.videoFile) : null;
+  return { photos, video };
+}
+
+function approvedPayloadHash(
+  data: RecreateJob["data"],
+  mediaHashes: RecreateJob["mediaHashes"],
+): string {
+  return createHash("sha256")
+    .update(JSON.stringify({ data, mediaHashes }))
+    .digest("hex");
+}
+
 export class JobService {
   private readonly now: () => Date;
   private readonly random: () => number;
+  private readonly createTails = new Map<string, Promise<void>>();
+  private readonly inFlightCreates = new Map<string, Promise<RecreateJob>>();
   /** Jobs currently being advanced by this service instance. A second
    *  processJob call for the same job JOINS the in-flight run instead
    *  of driving the same job twice concurrently (the route's background
@@ -99,6 +141,43 @@ export class JobService {
   // -- Creation -----------------------------------------------------------
 
   async createJob(userId: string, listingId: string): Promise<RecreateJob> {
+    const key = `${userId}:${listingId}`;
+    const existing = this.inFlightCreates.get(key);
+    if (existing) {
+      return existing;
+    }
+    const previous = this.createTails.get(userId) ?? Promise.resolve();
+    let release!: () => void;
+    const lock = new Promise<void>((resolve) => { release = resolve; });
+    const tail = previous.then(() => lock);
+    this.createTails.set(userId, tail);
+    const run = (async () => {
+      await previous;
+      try {
+        const create = () => this.createJobOnce(userId, listingId);
+        return this.options.withUserOperation
+          ? await this.options.withUserOperation(userId, create)
+          : await create();
+      } finally {
+        release();
+      }
+    })();
+    this.inFlightCreates.set(key, run);
+    try {
+      return await run;
+    } finally {
+      this.inFlightCreates.delete(key);
+      if (this.createTails.get(userId) === tail) {
+        this.createTails.delete(userId);
+      }
+    }
+  }
+
+  private async createJobOnce(userId: string, listingId: string): Promise<RecreateJob> {
+    const existingForListing = this.store.listJobs(userId).find((entry) => entry.listingId === listingId);
+    if (existingForListing) {
+      return existingForListing;
+    }
     const synced = this.store.getListings(userId);
     const listing = synced.find((entry) => entry.id === listingId);
     if (!listing) {
@@ -107,6 +186,9 @@ export class JobService {
     const clone = this.store.getClone(userId, listingId);
     if (!clone || !clone.recovery) {
       throw new CloneNotFoundError(listingId);
+    }
+    if (clone.recovery.listingId !== listingId) {
+      throw new JobIncompleteError(["clone_listing_identity"]);
     }
     const resolved = resolveJobData(clone);
     if (!resolved.data) {
@@ -117,7 +199,14 @@ export class JobService {
       throw new ActiveJobExistsError(active.id);
     }
 
-    const data = resolved.data;
+    const data = structuredClone(resolved.data);
+    let mediaHashes: { photos: string[]; video: string | null };
+    try {
+      mediaHashes = await hashApprovedMedia(this.dataDir, userId, listingId, data);
+    } catch {
+      throw new JobIncompleteError(["photos", ...(data.videoFile ? ["video"] : [])]);
+    }
+    const approvedPayloadDigest = approvedPayloadHash(data, mediaHashes);
     const at = this.now().toISOString();
     const job: RecreateJob = {
       id: randomUUID(),
@@ -125,6 +214,16 @@ export class JobService {
       listingId,
       listingTitle: data.title,
       oldListingUrl: listing.url,
+      originalListing: {
+        id: listing.id,
+        title: listing.title,
+        price: listing.price,
+        status: listing.status,
+        photoUrl: listing.photoUrl,
+        url: listing.url,
+      },
+      approvedPayloadHash: approvedPayloadDigest,
+      mediaHashes,
       status: "queued",
       dryRun: this.options.dryRun,
       data,
@@ -201,7 +300,10 @@ export class JobService {
       return job;
     }
     for (let step = 0; step < MAX_STEPS_PER_RUN; step += 1) {
-      const progressed = await this.stepOnce(job);
+      const operation = () => this.stepOnce(job);
+      const progressed = this.options.withUserOperation
+        ? await this.options.withUserOperation(job.userId, operation)
+        : await operation();
       if (!progressed) {
         break;
       }
@@ -240,13 +342,46 @@ export class JobService {
       if (job.status === "available") {
         return await this.stepDelete(job);
       }
+      if (job.status === "delete_intent") {
+        this.requireInput(
+          job,
+          "delete_reconciliation_required",
+          "The process stopped after deletion intent was persisted. Check the old listing manually; automatic deletion retry is disabled.",
+        );
+        await this.persist(job);
+        return true;
+      }
       if (job.status === "deleting") {
         return await this.stepVerify(job);
       }
       return false;
     } catch (error) {
       const message = error instanceof Error ? error.message : "Unknown driver error";
-      this.audit(job, "driver_error", message);
+      if (
+        job.status === "in_review" &&
+        job.inReviewSince &&
+        this.now().getTime() - Date.parse(job.inReviewSince) > this.options.stuckAfterMs
+      ) {
+        job.status = "stuck";
+        job.alert =
+          "Facebook has kept the new listing in review for over 48 hours. " +
+          "The old listing is still up and has NOT been deleted. Check Facebook, then recreate again if needed.";
+        this.audit(job, "stuck", `${job.alert} The latest availability read failed: ${message}`);
+      } else if (job.status === "creating") {
+        this.requireInput(
+          job,
+          "create_reconciliation_required",
+          `The create operation failed with an uncertain outcome: ${message} Check Facebook manually before any retry.`,
+        );
+      } else if (job.status === "delete_intent") {
+        this.requireInput(
+          job,
+          "delete_reconciliation_required",
+          `The delete operation failed with an uncertain outcome: ${message} Check the original listing manually before any retry.`,
+        );
+      } else {
+        this.audit(job, "driver_error", message);
+      }
       await this.persist(job);
       return false;
     }
@@ -255,22 +390,44 @@ export class JobService {
   // -- Steps ----------------------------------------------------------------
 
   private async stepCreate(job: RecreateJob): Promise<boolean> {
+    if (job.status === "creating") {
+      this.requireInput(
+        job,
+        "create_reconciliation_required",
+        "The process stopped after a create attempt began. Check Facebook manually; automatic retry and duplicate adoption are disabled.",
+      );
+      return true;
+    }
+    if (await this.payloadChanged(job)) {
+      this.requireInput(
+        job,
+        "approved_payload_changed",
+        "The approved clone payload or archived media changed after job creation. Run clone recovery and approve it again.",
+      );
+      return true;
+    }
     const fp = fingerprintOf(job.data, job.listingId);
 
     // Duplicate guard — runs before EVERY create attempt, so a retry
     // after a crash (job persisted in "creating") finds the copy the
     // first attempt may already have posted instead of duplicating it.
     const duplicate = await this.driver.findPossibleDuplicate(job.userId, fp);
-    if (duplicate) {
-      job.newListingId = duplicate.id;
-      job.newListingUrl = duplicate.url;
-      this.audit(
+    if (duplicate && "kind" in duplicate && duplicate.kind === "unknown") {
+      this.requireInput(
         job,
-        "duplicate_adopted",
-        `A listing that looks like this copy already exists (${duplicate.url}) — adopting it instead of creating a duplicate.`,
+        "duplicate_check_reconciliation_required",
+        `A complete duplicate check could not be obtained: ${duplicate.reason} Check the selling list before retrying.`,
       );
-      this.startWatch(job);
       await this.persist(job);
+      return true;
+    }
+    if (duplicate && !("kind" in duplicate && duplicate.kind === "unknown")) {
+      const candidate = duplicate as import("./cloneTypes.js").SyncedListing;
+      this.requireInput(
+        job,
+        "duplicate_reconciliation_required",
+        `A possible matching listing exists (${candidate.url}). Verify its exact ID, seller and complete payload before continuing; it will not be adopted automatically.`,
+      );
       return true;
     }
 
@@ -280,11 +437,9 @@ export class JobService {
     await this.persist(job);
 
     const archiveDir = archiveDirFor(this.dataDir, job.userId, job.listingId);
-    const photoPaths = job.data.photoFiles.map((fileName) =>
-      path.join(archiveDir, path.basename(fileName)),
-    );
+    const photoPaths = job.data.photoFiles.map((fileName) => path.join(archiveDir, fileName));
     const videoPath = job.data.videoFile
-      ? path.join(archiveDir, path.basename(job.data.videoFile))
+      ? path.join(archiveDir, job.data.videoFile)
       : null;
 
     const outcome = await this.driver.createListing(job.userId, job.data, photoPaths, videoPath, {
@@ -295,21 +450,56 @@ export class JobService {
       this.audit(
         job,
         "create_dry_run",
-        `Dry run: the create form was filled for "${job.data.title}" (${job.data.photoFiles.length} photo(s)) and stopped before posting. Nothing was created.`,
+        "Dry run: skipped the browser create flow. Nothing was uploaded, posted, or changed.",
       );
       this.startWatch(job);
       await this.persist(job);
       return true;
     }
     if (outcome.kind === "unknown") {
+      job.status = "needs_input";
+      const message = `Reconciliation required: creation outcome is unknown: ${outcome.reason} Check Facebook before any manual retry.`;
+      job.alert = message;
+      job.error = message;
+      this.audit(job, "create_reconciliation_required", message);
+      await this.persist(job);
+      return true;
+    }
+    if (outcome.kind === "blocked") {
       job.status = "failed";
       job.error = outcome.reason;
-      this.audit(job, "create_unknown", outcome.reason);
+      this.audit(job, "create_blocked", outcome.reason);
       await this.persist(job);
       return true;
     }
 
-    job.newListingId = outcome.listingId;
+    const createdId = /^\d+$/.test(outcome.listingId) ? outcome.listingId : null;
+    let urlId: string | null = null;
+    try {
+      const parsed = new URL(outcome.url);
+      const match = parsed.pathname.match(/^\/marketplace\/item\/(\d+)\/?$/);
+      if (
+        parsed.protocol === "https:" &&
+        (parsed.hostname === "facebook.com" || parsed.hostname === "www.facebook.com") &&
+        !parsed.search &&
+        !parsed.hash
+      ) {
+        urlId = match?.[1] ?? null;
+      }
+    } catch {
+      // An unreadable create URL is an ambiguous side effect.
+    }
+    if (!createdId || createdId === job.listingId || urlId !== createdId) {
+      this.requireInput(
+        job,
+        "create_reconciliation_required",
+        "The create result did not identify a distinct listing with a matching canonical Facebook URL. Check Facebook manually; automatic retry is disabled.",
+      );
+      await this.persist(job);
+      return true;
+    }
+
+    job.newListingId = createdId;
     job.newListingUrl = outcome.url;
     this.audit(job, "created", `New listing created: ${outcome.url}`);
     this.startWatch(job);
@@ -389,13 +579,12 @@ export class JobService {
 
   private async stepDelete(job: RecreateJob): Promise<boolean> {
     if (job.dryRun) {
-      // A dry-run job NEVER performs a real delete. The driver's own
-      // dry-run walk opens the delete flow and stops before confirming.
+      // A dry-run job NEVER opens a destructive delete flow.
       await this.driver.deleteListing(job.userId, job.listingId, { dryRun: true });
       this.audit(
         job,
         "delete_dry_run",
-        "Dry run: the delete flow for the old listing was opened and stopped before confirming. Nothing was deleted.",
+        "Dry run: skipped opening the destructive delete flow. Nothing was deleted or changed.",
       );
       job.status = "deleting";
       await this.persist(job);
@@ -441,19 +630,62 @@ export class JobService {
       return true;
     }
     if (fresh !== "available") {
-      this.audit(
+      this.requireInput(
         job,
-        "delete_deferred",
-        "The new listing's state could not be confirmed at delete time — the old listing was NOT deleted; will re-check.",
+        "delete_reconciliation_required",
+        "The new listing's state could not be confirmed at delete time — the old listing was NOT deleted. Check the replacement manually; automatic delete retry is disabled.",
       );
       await this.persist(job);
-      return false;
+      return true;
+    }
+
+    const replacement = await this.driver.verifyNewListing(
+      job.userId,
+      job.newListingId,
+      job.newListingUrl,
+      job.approvedPayloadHash,
+    );
+    if (
+      replacement.state !== "verified" ||
+      replacement.listingId !== job.newListingId ||
+      replacement.sellerMatchesOwner !== true ||
+      replacement.payloadHash !== job.approvedPayloadHash
+    ) {
+      this.requireInput(
+        job,
+        "replacement_reconciliation_required",
+        "The exact replacement listing, seller identity, and approved payload could not all be verified. The original was not deleted; manual reconciliation is required.",
+      );
+      await this.persist(job);
+      return true;
+    }
+
+    const originalState = await this.driver.checkOriginalUnchanged(job.userId, job.originalListing);
+    if (originalState !== "unchanged") {
+      this.requireInput(
+        job,
+        "original_reconciliation_required",
+        originalState === "changed"
+          ? "The original listing changed after approval. It was not deleted; review the changes and approve again."
+          : "The original listing could not be positively re-read. It was not deleted; manual reconciliation is required.",
+      );
+      await this.persist(job);
+      return true;
     }
 
     // Target check: the old listing must still be the person's own
     // listed item. If it is already gone, there is nothing to delete —
     // proceed to verification instead of failing.
     const stillListed = await this.driver.listingStillListed(job.userId, job.listingId);
+    if (stillListed === "unknown") {
+      this.requireInput(
+        job,
+        "original_listing_reconciliation_required",
+        "The original listing presence could not be confirmed. Its state and deletion outcome must be reconciled manually.",
+      );
+      await this.persist(job);
+      return true;
+    }
     if (!stillListed) {
       this.audit(
         job,
@@ -465,7 +697,24 @@ export class JobService {
       return true;
     }
 
+    job.status = "delete_intent";
+    this.audit(
+      job,
+      "delete_intent",
+      `Deletion of original listing ${job.listingId} was authorized after fresh replacement checks.`,
+    );
+    await this.persist(job);
+
     const outcome = await this.driver.deleteListing(job.userId, job.listingId, { dryRun: false });
+    if (outcome.kind === "unknown") {
+      this.requireInput(
+        job,
+        "delete_reconciliation_required",
+        `Deletion outcome is unknown: ${outcome.reason} Check the original listing before any retry.`,
+      );
+      await this.persist(job);
+      return true;
+    }
     if (outcome.kind === "not_deleted") {
       job.status = "failed";
       job.error =
@@ -476,9 +725,11 @@ export class JobService {
       return true;
     }
     if (outcome.kind !== "deleted") {
-      job.status = "failed";
-      job.error = "Delete refused: the driver returned a dry-run result for a real job.";
-      this.audit(job, "delete_refused", job.error);
+      this.requireInput(
+        job,
+        "delete_reconciliation_required",
+        "The delete driver returned no confirmed result. Check the original listing before any retry.",
+      );
       await this.persist(job);
       return true;
     }
@@ -506,7 +757,14 @@ export class JobService {
       return true;
     }
     const result = await this.driver.verifyRecreate(job.userId, job.listingId, job.newListingId);
-    if (result.oldGone && result.newListed) {
+    if (
+      result.complete &&
+      result.oldGone &&
+      result.newListed &&
+      result.newListingId === job.newListingId &&
+      result.newSellerId !== null &&
+      result.newPayloadHash === job.approvedPayloadHash
+    ) {
       this.audit(
         job,
         "verified",
@@ -516,11 +774,19 @@ export class JobService {
       return true;
     }
     const problems: string[] = [];
-    if (!result.oldGone) {
+    if (!result.complete) {
+      problems.push("the selling-list read was incomplete");
+    } else if (!result.oldGone) {
       problems.push("the old listing still appears in the selling list");
     }
-    if (!result.newListed) {
+    if (!result.newListed || result.newListingId !== job.newListingId) {
       problems.push("the new listing does not appear in the selling list");
+    }
+    if (!result.newSellerId) {
+      problems.push("the new listing seller could not be verified");
+    }
+    if (result.newPayloadHash !== job.approvedPayloadHash) {
+      problems.push("the new listing payload does not match the approved clone");
     }
     job.status = "failed";
     job.error = `Verification failed: ${problems.join(" and ")}. Check Facebook before doing anything else.`;
@@ -530,6 +796,27 @@ export class JobService {
   }
 
   // -- Helpers --------------------------------------------------------------
+
+  private async payloadChanged(job: RecreateJob): Promise<boolean> {
+    try {
+      const currentMedia = await hashApprovedMedia(
+        this.dataDir,
+        job.userId,
+        job.listingId,
+        job.data,
+      );
+      return approvedPayloadHash(job.data, currentMedia) !== job.approvedPayloadHash;
+    } catch {
+      return true;
+    }
+  }
+
+  private requireInput(job: RecreateJob, action: string, message: string): void {
+    job.status = "needs_input";
+    job.alert = message;
+    job.error = message;
+    this.audit(job, action, message);
+  }
 
   private startWatch(job: RecreateJob): void {
     const at = this.now().toISOString();
@@ -544,6 +831,10 @@ export class JobService {
     job.status = "done";
     job.completedAt = this.now().toISOString();
     this.audit(job, "done", `Recreate complete. New listing: ${job.newListingUrl ?? "(dry run)"}`);
+    const existingHistory = this.store.listHistory(job.userId).some((entry) => entry.jobId === job.id);
+    if (existingHistory) {
+      job.historyRecorded = true;
+    }
     if (!job.dryRun && !job.historyRecorded && job.newListingId && job.newListingUrl) {
       const entry: JobHistoryEntry = {
         id: randomUUID(),

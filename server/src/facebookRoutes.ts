@@ -12,7 +12,8 @@ import type { FastifyInstance } from "fastify";
 import type { WebSocket } from "ws";
 import { makeRequireAuth, userFromRequest } from "./auth.js";
 import type { BrowserInput, BrowserManager } from "./browserManager.js";
-import type { Store } from "./store.js";
+import { isAllowedRequestOrigin } from "./config.js";
+import { hashToken, type Store } from "./store.js";
 
 const ALLOWED_KEYS = new Set([
   "Enter",
@@ -73,6 +74,7 @@ export function registerFacebookRoutes(
   app: FastifyInstance,
   store: Store,
   browser: BrowserManager,
+  configuredOrigin: string,
 ): void {
   const requireAuth = makeRequireAuth(store);
 
@@ -82,7 +84,7 @@ export function registerFacebookRoutes(
       await reply.code(401).send({ error: "Not signed in" });
       return;
     }
-    const status = await browser.refreshStatus(user.id);
+    const status = await browser.withUserOperation(user.id, () => browser.refreshStatus(user.id));
     await reply.send({ status });
   });
 
@@ -106,68 +108,86 @@ export function registerFacebookRoutes(
     await reply.send({ status: "not_connected" });
   });
 
-  // Diagnostics for the person's OWN browser session (used by the live
-  // end-to-end check): current URL/title and the value currently in
-  // Facebook's email field. Removed once the connect flow is proven.
-  app.get("/api/facebook/debug", { preHandler: requireAuth }, async (request, reply) => {
-    const user = request.user;
-    if (!user) {
-      await reply.code(401).send({ error: "Not signed in" });
-      return;
-    }
-    const info = await browser.debugInfo(user.id);
-    if (!info) {
-      await reply.code(409).send({ error: "No active browser session" });
-      return;
-    }
-    await reply.send(info);
-  });
+  // Diagnostics that could expose login fields or sensitive page details
+  // are intentionally not registered.
 
   app.get("/api/facebook/view", { websocket: true }, (socket: WebSocket, request) => {
-    const user = userFromRequest(store, request);
-    if (!user) {
-      socket.close(4401, "Not signed in");
+    const origin = request.headers.origin;
+    const token = userFromRequest(store, request);
+    const rawToken = request.cookies.relist_session;
+    if (!origin || !isAllowedRequestOrigin(origin, configuredOrigin) || !token || !rawToken) {
+      socket.close(4401, "Not authorized");
       return;
     }
-    const userId = user.id;
+    const userId = token.id;
+    const socketOrigin = origin;
+    const unregisterSocket = browser.trackSocket(userId, hashToken(rawToken), socket);
     let lastFrameHash = "";
-    let tick = 0;
+    let tickRunning = false;
     let closed = false;
-
+    let queuedInputs = 0;
+    const MAX_QUEUED_INPUTS = 32;
+    const isOpen = () => !closed && socket.readyState === 1 &&
+      request.headers.origin === socketOrigin && isAllowedRequestOrigin(socketOrigin, configuredOrigin) &&
+      Boolean(store.findUserBySessionToken(rawToken));
+    const send = (data: Buffer | string) => {
+      if (isOpen()) socket.send(data);
+    };
     const timer = setInterval(() => {
+      if (tickRunning || !isOpen()) {
+        if (!isOpen()) socket.close(4401, "Session expired or revoked");
+        return;
+      }
+      tickRunning = true;
       void (async () => {
-        if (closed) {
-          return;
-        }
-        const frame = await browser.screenshot(userId);
-        if (frame && !closed) {
-          const hash = createHash("md5").update(frame).digest("hex");
-          if (hash !== lastFrameHash) {
-            lastFrameHash = hash;
-            socket.send(frame);
+        await browser.withUserOperation(userId, async () => {
+          if (!isOpen()) return;
+          const frame = await browser.screenshot(userId);
+          if (frame && isOpen()) {
+            const hash = createHash("sha256").update(frame).digest("hex");
+            if (hash !== lastFrameHash) {
+              lastFrameHash = hash;
+              send(frame);
+            }
           }
-        }
-        tick += 1;
-        if (tick % 3 === 0 && !closed) {
+          if (!isOpen()) return;
           const status = await browser.refreshStatus(userId);
-          socket.send(JSON.stringify({ kind: "status", status }));
-        }
-      })();
+          send(JSON.stringify({ kind: "status", status }));
+        });
+      })().catch(() => {
+        if (!closed && socket.readyState === 1) socket.close(1011, "Browser session unavailable");
+      }).finally(() => {
+        tickRunning = false;
+      });
     }, FRAME_INTERVAL_MS);
     timer.unref();
 
     socket.on("message", (data: Buffer) => {
-      void (async () => {
-        const input = parseBrowserInput(data.toString());
-        if (input) {
-          await browser.sendInput(userId, input);
-        }
-      })();
+      if (!isOpen()) {
+        socket.close(4401, "Session expired or revoked");
+        return;
+      }
+      if (queuedInputs >= MAX_QUEUED_INPUTS) {
+        socket.close(4429, "Input queue is full");
+        return;
+      }
+      const input = parseBrowserInput(data.toString());
+      if (!input) return;
+      queuedInputs += 1;
+      void browser.withUserOperation(userId, async () => {
+        if (isOpen()) await browser.sendInput(userId, input);
+        else socket.close(4401, "Session expired or revoked");
+      }).catch(() => {
+        if (!closed && socket.readyState === 1) socket.close(1011, "Browser input failed");
+      }).finally(() => {
+        queuedInputs -= 1;
+      });
     });
 
     socket.on("close", () => {
       closed = true;
       clearInterval(timer);
+      unregisterSocket();
     });
   });
 }

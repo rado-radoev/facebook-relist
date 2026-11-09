@@ -40,11 +40,11 @@ export function urlNeedsCheck(url: string): boolean {
 }
 
 export function detectFacebookStatus(signals: PageSignals): FacebookStatus {
-  if (signals.hasUserCookie) {
-    return "connected";
-  }
   if (urlNeedsCheck(signals.url)) {
     return "needs_check";
+  }
+  if (signals.hasUserCookie) {
+    return "connected";
   }
   if (signals.previousStatus === "connected") {
     return "expired";

@@ -10,7 +10,7 @@ import { readFile } from "node:fs/promises";
 import path from "node:path";
 import type { FastifyInstance } from "fastify";
 import { makeRequireAuth } from "./auth.js";
-import type { CloneEdits, ClonePicks } from "./cloneTypes.js";
+import type { CloneEdits, ClonePicks, SyncedListing } from "./cloneTypes.js";
 import { archiveDirFor } from "./recovery.js";
 import {
   FacebookNotConnectedError,
@@ -39,6 +39,16 @@ const PHOTO_CONTENT_TYPES: Record<string, string> = {
   ".webp": "image/webp",
   ".gif": "image/gif",
 };
+
+interface ListingsSyncReader {
+  getListingsSyncedAt?(userId: string): string | null;
+}
+
+function getListingsSyncedAt(store: Store, userId: string, listings: SyncedListing[]): string | null {
+  const syncReader = store as Store & ListingsSyncReader;
+  const persisted = syncReader.getListingsSyncedAt?.(userId);
+  return persisted ?? (listings.length ? listings[0].syncedAt : null);
+}
 
 function readStringRecord(
   body: Record<string, unknown>,
@@ -115,7 +125,7 @@ export function registerListingsRoutes(
       return;
     }
     const listings = store.getListings(user.id);
-    const syncedAt = listings.length > 0 ? listings[0].syncedAt : null;
+    const syncedAt = store.getListingsSyncedAt(user.id);
     await reply.send({ listings, syncedAt });
   });
 
@@ -127,7 +137,7 @@ export function registerListingsRoutes(
     }
     try {
       const listings = await scraper.syncListings(user.id);
-      const syncedAt = listings.length > 0 ? listings[0].syncedAt : null;
+      const syncedAt = store.getListingsSyncedAt(user.id);
       await reply.send({ listings, syncedAt });
     } catch (error) {
       if (error instanceof FacebookNotConnectedError) {
