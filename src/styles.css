@@ -66,7 +66,6 @@ button {
 }
 
 .preview-badge {
-  margin-left: auto;
   font-size: 11px;
   font-weight: 600;
   text-transform: uppercase;
@@ -157,34 +156,16 @@ button {
   opacity: 0.6;
 }
 
-/* Account switcher */
-.account-row {
-  display: flex;
-  gap: 8px;
-  overflow-x: auto;
-  padding-bottom: 2px;
-  scrollbar-width: none;
-}
-
-.account-row::-webkit-scrollbar {
-  display: none;
-}
-
-.account-chip {
+/* Signed-in identity (header) — one person per device, no switcher */
+.user-identity {
+  margin-left: auto;
   display: inline-flex;
   align-items: center;
   gap: 7px;
-  white-space: nowrap;
-  background: var(--surface-soft);
-  border: 1px solid var(--surface);
-  border-radius: 999px;
-  padding: 6px 12px 6px 6px;
-  font-size: 13.5px;
-  color: var(--subtext);
-  cursor: pointer;
+  min-width: 0;
 }
 
-.account-chip-avatar {
+.user-avatar {
   width: 26px;
   height: 26px;
   border-radius: 50%;
@@ -198,24 +179,23 @@ button {
   flex-shrink: 0;
 }
 
-.account-chip-dot {
-  width: 7px;
-  height: 7px;
-  border-radius: 50%;
+.user-name {
+  font-size: 13.5px;
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.sign-out-button {
+  background: transparent;
+  border: none;
+  padding: 4px 2px;
+  font-size: 12.5px;
+  color: var(--subtext);
+  text-decoration: underline;
+  opacity: 0.6;
   flex-shrink: 0;
-}
-
-.account-chip-active {
-  border-color: var(--accent);
-  color: var(--text);
-  font-weight: 600;
-}
-
-.account-chip-add {
-  padding: 6px 13px;
-  border-style: dashed;
-  color: var(--accent);
-  font-weight: 600;
 }
 
 .connection-avatar-muted {
@@ -280,8 +260,8 @@ button {
   gap: 10px;
 }
 
-/* Household accounts (Settings) */
-.account-list {
+/* Settings rows (Your account) */
+.setting-rows {
   list-style: none;
   margin: 0 0 10px;
   padding: 0;
@@ -289,7 +269,7 @@ button {
   flex-direction: column;
 }
 
-.account-list-row {
+.setting-row {
   display: flex;
   align-items: center;
   gap: 10px;
@@ -297,21 +277,22 @@ button {
   border-top: 1px solid var(--surface);
 }
 
-.account-list-row:first-child {
+.setting-row:first-child {
   border-top: none;
   padding-top: 0;
 }
 
-.account-list-name {
+.setting-row-label {
   flex: 1;
   min-width: 0;
-  font-size: 14.5px;
-  font-weight: 600;
+  font-size: 14px;
+  color: var(--subtext);
 }
 
-.account-list-status {
-  font-size: 12.5px;
+.setting-row-value {
+  font-size: 14.5px;
   font-weight: 600;
+  text-align: right;
 }
 
 /* Filter chips */

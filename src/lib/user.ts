@@ -1,5 +1,6 @@
-// Shared account/session helpers: status labels and colours, first names.
-// Components import from here instead of hard-coding session strings.
+// Shared helpers for the signed-in user: Facebook session status labels
+// and colours, first names. Components import from here instead of
+// hard-coding session strings.
 
 import type { SessionStatus } from "../types";
 

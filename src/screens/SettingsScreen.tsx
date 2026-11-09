@@ -1,43 +1,51 @@
-import type { Account } from "../types";
-import { SESSION_META } from "../lib/accounts";
+import type { CurrentUser } from "../types";
+import { SESSION_META } from "../lib/user";
 
 interface Props {
-  accounts: Account[];
+  user: CurrentUser;
 }
 
-export default function SettingsScreen({ accounts }: Props) {
+export default function SettingsScreen({ user }: Props) {
+  const meta = SESSION_META[user.facebookStatus];
+
   return (
     <div className="screen">
       <h1 className="screen-title">Settings</h1>
 
       <section className="card">
-        <h2 className="card-title">Household accounts</h2>
-        <p className="card-sub">One profile per person — each with their own Facebook login and listings.</p>
-        <ul className="account-list">
-          {accounts.map((account) => {
-            const meta = SESSION_META[account.sessionStatus];
-            return (
-              <li key={account.id} className="account-list-row">
-                <span className="account-chip-avatar" aria-hidden="true">
-                  {account.initials}
-                </span>
-                <span className="account-list-name">{account.displayName}</span>
-                <span className="account-list-status" style={{ color: meta.color }}>
-                  {meta.label}
-                </span>
-              </li>
-            );
-          })}
+        <h2 className="card-title">Your account</h2>
+        <ul className="setting-rows">
+          <li className="setting-row">
+            <span className="setting-row-label">Signed in as</span>
+            <span className="setting-row-value">{user.displayName}</span>
+          </li>
+          <li className="setting-row">
+            <span className="setting-row-label">Facebook</span>
+            <span className="setting-row-value" style={{ color: meta.color }}>
+              {meta.label}
+            </span>
+          </li>
+          <li className="setting-row">
+            <span className="setting-row-label">App lock PIN</span>
+            <span className="setting-row-value">Off</span>
+          </li>
         </ul>
-        <p className="setting-text">Profile PIN: off — optional per person, for anyone who wants a lock on their profile.</p>
+        <p className="setting-text">App lock PIN: off — optional, protects this phone only.</p>
+      </section>
+
+      <section className="card">
+        <h2 className="card-title">Family</h2>
+        <p className="setting-text">
+          Everyone else in the family installs Relist on their own phone and signs in with their own account.
+          Nobody can switch into your account — there is no account switcher.
+        </p>
       </section>
 
       <section className="card">
         <h2 className="card-title">Where Relist runs</h2>
         <p className="setting-text">
-          Relist runs locally: this app on your phone talks to its own small backend on your home server. Each
-          person's Facebook session is stored separately on that server only — the app never stores anyone's
-          password.
+          Relist runs locally: this app on your phone talks to its own small backend on your home server. Your
+          Facebook session is stored on that server only — the app never stores your password.
         </p>
       </section>
 
@@ -52,7 +60,7 @@ export default function SettingsScreen({ accounts }: Props) {
       <section className="card">
         <h2 className="card-title">About this preview</h2>
         <p className="setting-text">
-          This is a design preview: there is no Facebook connection and no backend. Listings, photos, accounts, and
+          This is a design preview: there is no Facebook connection and no backend. Listings, photos, identity, and
           progress are stand-ins so you can see and tap through the real flow.
         </p>
       </section>

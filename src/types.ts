@@ -6,11 +6,16 @@ export interface MeetupPrefs {
 
 export type SessionStatus = "connected" | "expired" | "none";
 
-export interface Account {
+/**
+ * The one person signed in to Relist on this device. There is deliberately
+ * no list of switchable accounts: the backend scopes data by account id,
+ * but a device only ever shows its own signed-in person's data.
+ */
+export interface CurrentUser {
   id: string;
   displayName: string;
   initials: string;
-  sessionStatus: SessionStatus;
+  facebookStatus: SessionStatus;
 }
 
 export interface Listing {

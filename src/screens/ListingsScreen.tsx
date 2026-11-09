@@ -1,30 +1,28 @@
 import { useState } from "react";
-import type { Account, Listing } from "../types";
-import { accounts } from "../data/accounts";
+import type { CurrentUser, Listing } from "../types";
 import { listings } from "../data/listings";
 import { FILTERS, matchesFilter, type FilterId } from "../lib/status";
-import { firstName } from "../lib/accounts";
-import AccountSwitcher from "../components/AccountSwitcher";
+import { firstName } from "../lib/user";
 import ConnectionCard from "../components/ConnectionCard";
 import ListingRow from "../components/ListingRow";
 
 interface Props {
-  account: Account;
-  onSelectAccount: (account: Account) => void;
-  onAddPerson: () => void;
+  user: CurrentUser;
+  onConnect: () => void;
   onOpen: (listing: Listing) => void;
 }
 
-export default function ListingsScreen({ account, onSelectAccount, onAddPerson, onOpen }: Props) {
+export default function ListingsScreen({ user, onConnect, onOpen }: Props) {
   const [filter, setFilter] = useState<FilterId>("active");
-  const ownListings = listings.filter((listing) => listing.accountId === account.id);
+  // Only the signed-in person's listings exist in this app — the backend
+  // derives the account from the signed-in session, never from the client.
+  const ownListings = listings.filter((listing) => listing.accountId === user.id);
   const visible = ownListings.filter((listing) => matchesFilter(listing.status, filter));
-  const isConnected = account.sessionStatus === "connected";
+  const isConnected = user.facebookStatus === "connected";
 
   return (
     <div className="screen">
-      <AccountSwitcher accounts={accounts} activeId={account.id} onSelect={onSelectAccount} onAdd={onAddPerson} />
-      <ConnectionCard account={account} onConnect={onAddPerson} />
+      <ConnectionCard user={user} onConnect={onConnect} />
 
       {isConnected ? (
         <>
@@ -50,18 +48,17 @@ export default function ListingsScreen({ account, onSelectAccount, onAddPerson, 
           </div>
 
           <p className="screen-footnote">
-            Preview: these are {firstName(account.displayName)}'s real listings, loaded from seed data. The full app
-            reads them live from that person's own Facebook session.
+            Preview: these are {firstName(user.displayName)}'s real listings, loaded from seed data. The full app
+            reads them live from your own Facebook session.
           </p>
         </>
       ) : (
         <section className="card empty-account">
-          <h2 className="card-title">No listings for {firstName(account.displayName)} yet</h2>
+          <h2 className="card-title">No listings yet</h2>
           <p className="setting-text">
-            {firstName(account.displayName)} has not connected Facebook, so this account has no listings. Once they
-            connect, only their own listings will show here.
+            Connect your Facebook account and your listings will show here — only yours.
           </p>
-          <button type="button" className="primary-button" onClick={onAddPerson}>
+          <button type="button" className="primary-button" onClick={onConnect}>
             Connect Facebook
           </button>
         </section>

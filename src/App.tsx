@@ -1,6 +1,6 @@
 import { useState } from "react";
-import type { Account, Listing, TabId, View } from "./types";
-import { accounts, defaultAccount } from "./data/accounts";
+import type { Listing, TabId, View } from "./types";
+import { currentUser } from "./data/currentUser";
 import TabBar from "./components/TabBar";
 import ListingsScreen from "./screens/ListingsScreen";
 import DetailScreen from "./screens/DetailScreen";
@@ -12,13 +12,6 @@ import ConnectScreen from "./screens/ConnectScreen";
 export default function App() {
   const [tab, setTab] = useState<TabId>("listings");
   const [view, setView] = useState<View>({ kind: "tabs" });
-  const [activeAccount, setActiveAccount] = useState<Account>(defaultAccount);
-
-  function selectAccount(account: Account) {
-    setActiveAccount(account);
-    setTab("listings");
-    setView({ kind: "tabs" });
-  }
 
   function openConnect() {
     setView({ kind: "connect" });
@@ -37,15 +30,7 @@ export default function App() {
     setView({ kind: "tabs" });
   }
 
-  let body = (
-    <ListingsScreen
-      key={activeAccount.id}
-      account={activeAccount}
-      onSelectAccount={selectAccount}
-      onAddPerson={openConnect}
-      onOpen={openListing}
-    />
-  );
+  let body = <ListingsScreen user={currentUser} onConnect={openConnect} onOpen={openListing} />;
   if (view.kind === "detail") {
     body = (
       <DetailScreen listing={view.listing} onBack={() => setView({ kind: "tabs" })} onRecreate={startRecreate} />
@@ -61,7 +46,7 @@ export default function App() {
     body = <HistoryScreen />;
   }
   if (view.kind === "tabs" && tab === "settings") {
-    body = <SettingsScreen accounts={accounts} />;
+    body = <SettingsScreen user={currentUser} />;
   }
 
   const showTabs = view.kind === "tabs";
@@ -74,6 +59,15 @@ export default function App() {
         </span>
         <span className="app-name">Relist</span>
         <span className="preview-badge">Preview</span>
+        <span className="user-identity">
+          <span className="user-avatar" aria-hidden="true">
+            {currentUser.initials}
+          </span>
+          <span className="user-name">{currentUser.displayName}</span>
+          <button type="button" className="sign-out-button" disabled title="Preview only">
+            Sign out
+          </button>
+        </span>
       </header>
 
       <main className="app-main">{body}</main>

@@ -3,7 +3,7 @@ interface Props {
 }
 
 const STEPS: string[] = [
-  "Open Relist and tap “Add person”.",
+  "Tap “Connect Facebook” and Relist opens Facebook's login page in its backend browser.",
   "Log in on Facebook's own page — Relist never sees your password.",
   "Approve the text-message code on your phone.",
   "Your listings appear here — only yours.",
@@ -16,8 +16,8 @@ export default function ConnectScreen({ onBack }: Props) {
         ← Back
       </button>
 
-      <h1 className="screen-title">Add a person</h1>
-      <p className="screen-subtitle">Each person in the household gets their own Relist profile and Facebook login.</p>
+      <h1 className="screen-title">Connect Facebook</h1>
+      <p className="screen-subtitle">Set up your own Facebook connection on this phone.</p>
 
       <section className="card">
         <h2 className="card-title">How connecting works</h2>
@@ -33,7 +33,10 @@ export default function ConnectScreen({ onBack }: Props) {
         </ol>
       </section>
 
-      <p className="safety-note">Each person sees only their own listings. Nobody in the household can see or recreate anyone else's.</p>
+      <p className="safety-note">
+        This connects your own account, on your own phone. There is no way to connect or open anyone else's
+        account here.
+      </p>
 
       <button type="button" className="primary-button" disabled title="Preview only">
         Connect Facebook (preview)
