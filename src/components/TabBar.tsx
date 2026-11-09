@@ -9,7 +9,6 @@ interface TabDef {
 const TABS: TabDef[] = [
   { id: "listings", label: "Listings", icon: "🗂️" },
   { id: "history", label: "History", icon: "🕘" },
-  { id: "settings", label: "Settings", icon: "⚙️" },
 ];
 
 interface Props {

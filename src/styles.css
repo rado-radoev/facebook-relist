@@ -156,48 +156,6 @@ button {
   opacity: 0.6;
 }
 
-/* Signed-in identity (header) — one person per device, no switcher */
-.user-identity {
-  margin-left: auto;
-  display: inline-flex;
-  align-items: center;
-  gap: 7px;
-  min-width: 0;
-}
-
-.user-avatar {
-  width: 26px;
-  height: 26px;
-  border-radius: 50%;
-  background: var(--accent);
-  color: var(--base);
-  font-size: 11px;
-  font-weight: 700;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  flex-shrink: 0;
-}
-
-.user-name {
-  font-size: 13.5px;
-  font-weight: 600;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.sign-out-button {
-  background: transparent;
-  border: none;
-  padding: 4px 2px;
-  font-size: 12.5px;
-  color: var(--subtext);
-  text-decoration: underline;
-  opacity: 0.6;
-  flex-shrink: 0;
-}
-
 .connection-avatar-muted {
   background: var(--surface);
   color: var(--subtext);
@@ -260,46 +218,15 @@ button {
   gap: 10px;
 }
 
-/* Settings rows (Your account) */
-.setting-rows {
-  list-style: none;
-  margin: 0 0 10px;
-  padding: 0;
-  display: flex;
-  flex-direction: column;
-}
-
-.setting-row {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: 8px 0;
-  border-top: 1px solid var(--surface);
-}
-
-.setting-row:first-child {
-  border-top: none;
-  padding-top: 0;
-}
-
-.setting-row-label {
-  flex: 1;
-  min-width: 0;
-  font-size: 14px;
-  color: var(--subtext);
-}
-
-.setting-row-value {
-  font-size: 14.5px;
-  font-weight: 600;
-  text-align: right;
-}
-
-/* Filter chips */
+/* Filter chips: one non-wrapping row, swipe-scrollable sideways.
+   Chips must not shrink (flex: 0 0 auto) or the row squeezes them
+   instead of scrolling. */
 .chip-row {
   display: flex;
+  flex-wrap: nowrap;
   gap: 8px;
   overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
   padding-bottom: 2px;
   scrollbar-width: none;
 }
@@ -309,6 +236,7 @@ button {
 }
 
 .chip {
+  flex: 0 0 auto;
   white-space: nowrap;
   background: var(--surface-soft);
   border: 1px solid var(--surface);
@@ -536,8 +464,109 @@ button {
   color: var(--yellow);
 }
 
+.check-missing .check-value {
+  color: var(--yellow);
+}
+
 .check-unknown .check-value {
   color: var(--subtext);
+}
+
+/* Inline picker for a field the clone check could not recover */
+.check-picker {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 6px;
+}
+
+.check-chip {
+  background: var(--surface-soft);
+  border: 1px solid var(--overlay);
+  border-radius: 999px;
+  padding: 7px 12px;
+  font-size: 13.5px;
+  color: var(--text);
+  cursor: pointer;
+}
+
+.check-chip:active {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--base);
+}
+
+.check-chip-current {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--base);
+  font-weight: 600;
+}
+
+.check-chip-save {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--base);
+  font-weight: 600;
+}
+
+/* Edit affordance on already-set clone-check fields */
+.edit-button {
+  align-self: flex-start;
+  background: none;
+  border: none;
+  padding: 2px 0;
+  font-size: 13.5px;
+  font-weight: 600;
+  color: var(--accent);
+  cursor: pointer;
+}
+
+.edited-tag {
+  margin-left: 8px;
+  padding: 1px 7px;
+  border-radius: 999px;
+  background: var(--accent);
+  color: var(--base);
+  font-size: 10.5px;
+  font-weight: 700;
+  letter-spacing: 0.4px;
+  vertical-align: 1px;
+}
+
+.check-editor {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 6px;
+}
+
+.check-edit-input {
+  background: var(--surface-soft);
+  border: 1px solid var(--overlay);
+  border-radius: 10px;
+  padding: 10px;
+  font-size: 15px;
+  color: var(--text);
+  width: 100%;
+  font-family: inherit;
+}
+
+.check-editor-actions {
+  display: flex;
+  gap: 6px;
+}
+
+.blocked-note {
+  color: var(--yellow);
+  font-size: 14px;
+  line-height: 1.45;
+  margin: 0;
+}
+
+.primary-button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
 }
 
 .primary-button {
@@ -713,4 +742,110 @@ button {
 .tab-button-active {
   color: var(--accent);
   font-weight: 700;
+}
+
+/* Sprint 1 — auth form */
+.auth-form {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.auth-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 14px;
+  color: var(--subtext);
+}
+
+.auth-field input {
+  background: var(--surface-soft);
+  border: 1px solid var(--surface);
+  border-radius: 10px;
+  padding: 12px;
+  font-size: 16px;
+  color: var(--text);
+}
+
+.auth-error {
+  color: var(--red);
+  font-size: 14px;
+  margin: 0;
+}
+
+.link-button {
+  background: none;
+  border: none;
+  color: var(--accent);
+  font-size: 15px;
+  cursor: pointer;
+  padding: 8px;
+  align-self: center;
+}
+
+.connected-note {
+  text-align: center;
+  cursor: default;
+}
+
+/* Sprint 1 — live remote browser view */
+.remote-view-card {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.remote-view-status {
+  margin: 0;
+  font-size: 14px;
+  color: var(--subtext);
+}
+
+.remote-view-frame {
+  width: 100%;
+  border-radius: 10px;
+  border: 1px solid var(--surface);
+  cursor: pointer;
+  display: block;
+}
+
+.remote-view-placeholder {
+  border: 1px dashed var(--surface);
+  border-radius: 10px;
+  padding: 40px 16px;
+  text-align: center;
+  color: var(--subtext);
+  font-size: 14px;
+}
+
+.remote-view-type-label {
+  font-size: 13px;
+  color: var(--subtext);
+}
+
+.remote-view-type {
+  background: var(--surface-soft);
+  border: 1px solid var(--surface);
+  border-radius: 10px;
+  padding: 12px;
+  font-size: 16px;
+  color: var(--text);
+  width: 100%;
+}
+
+.remote-view-keys {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.remote-key-button {
+  background: var(--surface);
+  border: none;
+  border-radius: 10px;
+  padding: 9px 12px;
+  font-size: 14px;
+  color: var(--text);
+  cursor: pointer;
 }

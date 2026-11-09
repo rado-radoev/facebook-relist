@@ -4,7 +4,12 @@ export interface MeetupPrefs {
   doorDropoff: boolean;
 }
 
-export type SessionStatus = "connected" | "expired" | "none";
+export type SessionStatus =
+  | "not_connected"
+  | "login_in_progress"
+  | "connected"
+  | "needs_check"
+  | "expired";
 
 /**
  * The one person signed in to Relist on this device. There is deliberately
@@ -41,7 +46,7 @@ export interface Listing {
   locationLabel: string;
 }
 
-export type TabId = "listings" | "history" | "settings";
+export type TabId = "listings" | "history";
 
 export type View =
   | { kind: "tabs" }

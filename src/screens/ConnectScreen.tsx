@@ -1,15 +1,39 @@
+import { useState } from "react";
+import type { SessionStatus } from "../types";
+import { ApiError, connectFacebook } from "../lib/api";
+import RemoteBrowserView from "../components/RemoteBrowserView";
+
 interface Props {
+  facebookStatus: SessionStatus;
+  onStatusChange: (status: SessionStatus) => void;
   onBack: () => void;
 }
 
 const STEPS: string[] = [
-  "Tap “Connect Facebook” and Relist opens Facebook's login page in its backend browser.",
-  "Log in on Facebook's own page — Relist never sees your password.",
-  "Approve the text-message code on your phone.",
-  "Your listings appear here — only yours.",
+  "Tap “Open Facebook login” and Relist opens Facebook's login page in its backend browser, on your home server.",
+  "Log in on Facebook's own page — you type into Facebook itself, in the live view below. Relist never sees your password.",
+  "Approve the text-message code on your phone if Facebook asks.",
+  "When Facebook lets you in, this screen shows Connected and your listings appear — only yours.",
 ];
 
-export default function ConnectScreen({ onBack }: Props) {
+export default function ConnectScreen({ facebookStatus, onStatusChange, onBack }: Props) {
+  const [starting, setStarting] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const showRemote = facebookStatus === "login_in_progress" || facebookStatus === "needs_check" || starting;
+
+  async function handleStart() {
+    setError(null);
+    setStarting(true);
+    try {
+      const status = await connectFacebook();
+      onStatusChange(status);
+    } catch (caught) {
+      const message = caught instanceof ApiError ? caught.message : "Could not reach the Relist backend";
+      setError(message);
+      setStarting(false);
+    }
+  }
+
   return (
     <div className="screen">
       <button type="button" className="back-button" onClick={onBack}>
@@ -38,13 +62,28 @@ export default function ConnectScreen({ onBack }: Props) {
         account here.
       </p>
 
-      <button type="button" className="primary-button" disabled title="Preview only">
-        Connect Facebook (preview)
-      </button>
-      <p className="screen-footnote">
-        Preview only: this screen explains the flow. In the full app, the button above opens Facebook's own login
-        page in the app's backend browser on the home server.
-      </p>
+      {facebookStatus === "connected" ? (
+        <p className="primary-button connected-note">Facebook is connected ✓</p>
+      ) : null}
+
+      {facebookStatus !== "connected" && !showRemote ? (
+        <button type="button" className="primary-button" onClick={handleStart} disabled={starting}>
+          {starting ? "Opening Facebook…" : "Open Facebook login"}
+        </button>
+      ) : null}
+
+      {error ? <p className="auth-error">{error}</p> : null}
+
+      {facebookStatus !== "connected" && showRemote ? (
+        <RemoteBrowserView onStatusChange={onStatusChange} />
+      ) : null}
+
+      {facebookStatus === "needs_check" ? (
+        <p className="screen-footnote">
+          Facebook is showing a security check — finish it in the live view above (or approve the login on
+          your phone), and Relist will notice automatically.
+        </p>
+      ) : null}
     </div>
   );
 }

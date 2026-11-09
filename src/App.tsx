@@ -1,17 +1,70 @@
-import { useState } from "react";
-import type { Listing, TabId, View } from "./types";
-import { currentUser } from "./data/currentUser";
+import { useCallback, useEffect, useState } from "react";
+import type { CurrentUser, Listing, SessionStatus, TabId, View } from "./types";
+import {
+  disconnectFacebook,
+  fetchFacebookStatus,
+  fetchMe,
+  type ApiUser,
+} from "./lib/api";
+import { initialsOf } from "./lib/user";
 import TabBar from "./components/TabBar";
+import AuthScreen from "./screens/AuthScreen";
 import ListingsScreen from "./screens/ListingsScreen";
 import DetailScreen from "./screens/DetailScreen";
 import ProgressScreen from "./screens/ProgressScreen";
 import HistoryScreen from "./screens/HistoryScreen";
-import SettingsScreen from "./screens/SettingsScreen";
 import ConnectScreen from "./screens/ConnectScreen";
 
+type AuthState =
+  | { kind: "loading" }
+  | { kind: "signedOut" }
+  | { kind: "signedIn"; user: ApiUser };
+
 export default function App() {
+  const [auth, setAuth] = useState<AuthState>({ kind: "loading" });
+  const [facebookStatus, setFacebookStatus] = useState<SessionStatus>("not_connected");
   const [tab, setTab] = useState<TabId>("listings");
   const [view, setView] = useState<View>({ kind: "tabs" });
+
+  const refreshFacebookStatus = useCallback(async () => {
+    try {
+      const status = await fetchFacebookStatus();
+      setFacebookStatus(status);
+    } catch {
+      // Backend unreachable — keep the last known status on screen.
+    }
+  }, []);
+
+  useEffect(() => {
+    async function loadSession() {
+      try {
+        const user = await fetchMe();
+        setAuth({ kind: "signedIn", user });
+        await refreshFacebookStatus();
+      } catch {
+        setAuth({ kind: "signedOut" });
+      }
+    }
+    void loadSession();
+  }, [refreshFacebookStatus]);
+
+  const handleStatusChange = useCallback((status: SessionStatus) => {
+    setFacebookStatus(status);
+  }, []);
+
+  async function handleDisconnect() {
+    try {
+      const status = await disconnectFacebook();
+      setFacebookStatus(status);
+    } catch {
+      await refreshFacebookStatus();
+    }
+  }
+
+  function handleSignedIn(user: ApiUser) {
+    setAuth({ kind: "signedIn", user });
+    void refreshFacebookStatus();
+  }
 
   function openConnect() {
     setView({ kind: "connect" });
@@ -28,9 +81,58 @@ export default function App() {
   function backToTabs(nextTab: TabId) {
     setTab(nextTab);
     setView({ kind: "tabs" });
+    void refreshFacebookStatus();
   }
 
-  let body = <ListingsScreen user={currentUser} onConnect={openConnect} onOpen={openListing} />;
+  if (auth.kind === "loading") {
+    return (
+      <div className="phone">
+        <header className="app-header">
+          <span className="app-logo" aria-hidden="true">
+            🔁
+          </span>
+          <span className="app-name">Relist</span>
+        </header>
+        <main className="app-main">
+          <div className="screen">
+            <p className="empty-note">Loading…</p>
+          </div>
+        </main>
+      </div>
+    );
+  }
+
+  if (auth.kind === "signedOut") {
+    return (
+      <div className="phone">
+        <header className="app-header">
+          <span className="app-logo" aria-hidden="true">
+            🔁
+          </span>
+          <span className="app-name">Relist</span>
+        </header>
+        <main className="app-main">
+          <AuthScreen onSignedIn={handleSignedIn} />
+        </main>
+      </div>
+    );
+  }
+
+  const currentUser: CurrentUser = {
+    id: auth.user.id,
+    displayName: auth.user.name,
+    initials: initialsOf(auth.user.name),
+    facebookStatus,
+  };
+
+  let body = (
+    <ListingsScreen
+      user={currentUser}
+      onConnect={openConnect}
+      onDisconnect={handleDisconnect}
+      onOpen={openListing}
+    />
+  );
   if (view.kind === "detail") {
     body = (
       <DetailScreen listing={view.listing} onBack={() => setView({ kind: "tabs" })} onRecreate={startRecreate} />
@@ -40,13 +142,16 @@ export default function App() {
     body = <ProgressScreen listing={view.listing} onDone={() => backToTabs("history")} />;
   }
   if (view.kind === "connect") {
-    body = <ConnectScreen onBack={() => setView({ kind: "tabs" })} />;
+    body = (
+      <ConnectScreen
+        facebookStatus={facebookStatus}
+        onStatusChange={handleStatusChange}
+        onBack={() => backToTabs("listings")}
+      />
+    );
   }
   if (view.kind === "tabs" && tab === "history") {
     body = <HistoryScreen />;
-  }
-  if (view.kind === "tabs" && tab === "settings") {
-    body = <SettingsScreen user={currentUser} />;
   }
 
   const showTabs = view.kind === "tabs";
@@ -58,16 +163,7 @@ export default function App() {
           🔁
         </span>
         <span className="app-name">Relist</span>
-        <span className="preview-badge">Preview</span>
-        <span className="user-identity">
-          <span className="user-avatar" aria-hidden="true">
-            {currentUser.initials}
-          </span>
-          <span className="user-name">{currentUser.displayName}</span>
-          <button type="button" className="sign-out-button" disabled title="Preview only">
-            Sign out
-          </button>
-        </span>
+        <span className="preview-badge">Sprint 1</span>
       </header>
 
       <main className="app-main">{body}</main>

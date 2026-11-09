@@ -9,20 +9,21 @@ import ListingRow from "../components/ListingRow";
 interface Props {
   user: CurrentUser;
   onConnect: () => void;
+  onDisconnect: () => void;
   onOpen: (listing: Listing) => void;
 }
 
-export default function ListingsScreen({ user, onConnect, onOpen }: Props) {
+export default function ListingsScreen({ user, onConnect, onDisconnect, onOpen }: Props) {
   const [filter, setFilter] = useState<FilterId>("active");
-  // Only the signed-in person's listings exist in this app — the backend
-  // derives the account from the signed-in session, never from the client.
-  const ownListings = listings.filter((listing) => listing.accountId === user.id);
-  const visible = ownListings.filter((listing) => matchesFilter(listing.status, filter));
+  // Sprint 1 stand-in: the seed listings stand in for the signed-in
+  // person's own listings. From Sprint 2 the backend serves only the
+  // session's own listings, so nothing client-side filters by account.
+  const visible = listings.filter((listing) => matchesFilter(listing.status, filter));
   const isConnected = user.facebookStatus === "connected";
 
   return (
     <div className="screen">
-      <ConnectionCard user={user} onConnect={onConnect} />
+      <ConnectionCard user={user} onConnect={onConnect} onDisconnect={onDisconnect} />
 
       {isConnected ? (
         <>
@@ -48,8 +49,8 @@ export default function ListingsScreen({ user, onConnect, onOpen }: Props) {
           </div>
 
           <p className="screen-footnote">
-            Preview: these are {firstName(user.displayName)}'s real listings, loaded from seed data. The full app
-            reads them live from your own Facebook session.
+            These are {firstName(user.displayName)}'s real listings, still loaded from seed data — live
+            listings sync from your own Facebook session arrives in Sprint 2.
           </p>
         </>
       ) : (
