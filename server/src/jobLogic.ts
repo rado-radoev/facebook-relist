@@ -104,6 +104,27 @@ export function resolveJobData(clone: StoredClone): ResolvedJobData {
   // Delivery flags are independent clone fields. A type pick cannot
   // silently stand in for unread shipping or meetup options.
   let delivery: DeliveryInfo | null = recovery.delivery.value;
+  const structuredDeliveryEdits = clone.deliveryEdits ?? {};
+  if (structuredDeliveryEdits.shipping !== undefined || structuredDeliveryEdits.meetup !== undefined) {
+    supplied.add("delivery");
+    delivery = {
+      type: delivery?.type ?? null,
+      shipping: structuredDeliveryEdits.shipping !== undefined
+        ? structuredDeliveryEdits.shipping
+        : delivery?.shipping ?? null,
+      meetup: {
+        public: structuredDeliveryEdits.meetup?.public !== undefined
+          ? structuredDeliveryEdits.meetup.public
+          : delivery?.meetup?.public ?? null,
+        doorPickup: structuredDeliveryEdits.meetup?.doorPickup !== undefined
+          ? structuredDeliveryEdits.meetup.doorPickup
+          : delivery?.meetup?.doorPickup ?? null,
+        doorDropoff: structuredDeliveryEdits.meetup?.doorDropoff !== undefined
+          ? structuredDeliveryEdits.meetup.doorDropoff
+          : delivery?.meetup?.doorDropoff ?? null,
+      },
+    };
+  }
   const deliveryEdit = edits.delivery;
   const deliveryPick = picks.delivery;
   if (deliveryEdit && deliveryEdit.trim().length > 0) {

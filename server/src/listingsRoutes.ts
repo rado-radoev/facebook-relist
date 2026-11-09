@@ -10,7 +10,7 @@ import { readFile } from "node:fs/promises";
 import path from "node:path";
 import type { FastifyInstance } from "fastify";
 import { makeRequireAuth } from "./auth.js";
-import type { CloneEdits, ClonePicks, SyncedListing } from "./cloneTypes.js";
+import type { CloneEdits, ClonePicks, DeliveryEdits, MeetupPrefs, SyncedListing } from "./cloneTypes.js";
 import { archiveDirFor } from "./recovery.js";
 import {
   FacebookNotConnectedError,
@@ -18,7 +18,7 @@ import {
   ScrapeFailedError,
   type ScrapeService,
 } from "./scrapeService.js";
-import type { Store } from "./store.js";
+import { CloneRevisionConflictError, type Store } from "./store.js";
 
 const PICK_KEYS = new Set(["condition", "category", "delivery"]);
 const EDIT_KEYS = new Set([
@@ -79,16 +79,42 @@ function readStringRecord(
 function readPicksBody(body: unknown): {
   picks: ClonePicks;
   edits: CloneEdits;
+  deliveryEdits: DeliveryEdits;
   photoSelection: string[] | null;
+  expectedRevision?: number;
 } | null {
   if (typeof body !== "object" || body === null) {
     return null;
   }
   const record = body as Record<string, unknown>;
+  if (record.revision !== undefined && (!Number.isInteger(record.revision) || (record.revision as number) < 0)) return null;
   const picks = readStringRecord(record, "picks", PICK_KEYS, 200);
   const edits = readStringRecord(record, "edits", EDIT_KEYS, 5000);
   if (!picks || !edits) {
     return null;
+  }
+  const deliveryEdits: DeliveryEdits = {};
+  if (record.deliveryEdits !== undefined) {
+    const raw = record.deliveryEdits;
+    if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return null;
+    const structured = raw as Record<string, unknown>;
+    for (const key of Object.keys(structured)) {
+      if (key !== "shipping" && key !== "meetup") return null;
+    }
+    if ("shipping" in structured) {
+      if (structured.shipping !== null && typeof structured.shipping !== "boolean") return null;
+      deliveryEdits.shipping = structured.shipping as boolean | null;
+    }
+    if ("meetup" in structured) {
+      const meetup = structured.meetup;
+      if (typeof meetup !== "object" || meetup === null || Array.isArray(meetup)) return null;
+      const entries = meetup as Record<string, unknown>;
+      const validKeys = new Set<keyof MeetupPrefs>(["public", "doorPickup", "doorDropoff"]);
+      for (const [key, value] of Object.entries(entries)) {
+        if (!validKeys.has(key as keyof MeetupPrefs) || (value !== null && typeof value !== "boolean")) return null;
+      }
+      deliveryEdits.meetup = entries as Partial<MeetupPrefs>;
+    }
   }
   let photoSelection: string[] | null = null;
   const rawSelection = record.photoSelection;
@@ -106,7 +132,9 @@ function readPicksBody(body: unknown): {
   return {
     picks: picks as ClonePicks,
     edits: edits as CloneEdits,
+    deliveryEdits,
     photoSelection,
+    ...(record.revision === undefined ? {} : { expectedRevision: record.revision as number }),
   };
 }
 
@@ -222,8 +250,16 @@ export function registerListingsRoutes(
         await reply.code(400).send({ error: "Invalid picks/edits payload" });
         return;
       }
-      const clone = await store.saveClonePicks(user.id, id, parsed);
-      await reply.send({ clone });
+      try {
+        const clone = await store.saveClonePicks(user.id, id, parsed);
+        await reply.send({ clone });
+      } catch (error) {
+        if (error instanceof CloneRevisionConflictError) {
+          await reply.code(409).send({ error: error.message, currentRevision: error.current });
+          return;
+        }
+        throw error;
+      }
     },
   );
 

@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import CloneCheckList, { buildCloneCheck, unresolvedApprovalRows } from "./CloneCheckList";
 import type { Listing } from "../types";
@@ -68,6 +68,7 @@ describe("buildCloneCheck", () => {
         onPick={vi.fn()}
         overrides={{}}
         onOverride={vi.fn()}
+        onDeliveryChoice={vi.fn()}
         photoTiles={[
           { id: "sha256-a.jpg", src: "blob:photo-a", label: "Photo 1", origin: "original" },
           { id: "sha256-b.jpg", src: null, label: "Photo 2 — archive read returned 404", origin: "original" },
@@ -135,6 +136,7 @@ describe("buildCloneCheck", () => {
         onPick={onPick}
         overrides={{}}
         onOverride={vi.fn()}
+        onDeliveryChoice={vi.fn()}
         photoTiles={[]}
         photosEdited={false}
         onPhotoTilesChange={vi.fn()}
@@ -147,5 +149,42 @@ describe("buildCloneCheck", () => {
     fireEvent.click(screen.getByRole("button", { name: "Edit pick" }));
     fireEvent.click(screen.getByRole("button", { name: "Used – Good" }));
     expect(onPick).toHaveBeenCalledWith("condition", "Used – Good");
+  });
+
+  it("sends a structured delivery choice through onDeliveryChoice", () => {
+    const onDeliveryChoice = vi.fn();
+    render(
+      <CloneCheckList
+        listing={{
+          ...listing,
+          deliveryInfo: {
+            type: "Local pickup only",
+            shipping: null,
+            meetup: { public: null, doorPickup: null, doorDropoff: null },
+          },
+        }}
+        picks={{}}
+        onPick={vi.fn()}
+        overrides={{}}
+        onOverride={vi.fn()}
+        onDeliveryChoice={onDeliveryChoice}
+        photoTiles={[]}
+        photosEdited={false}
+        onPhotoTilesChange={vi.fn()}
+        canEditPhotos={false}
+        canAddReplacePhotos={false}
+        saveState="saved"
+      />,
+    );
+
+    const shippingRow = screen.getByText("Shipping").closest("li") as HTMLElement;
+    fireEvent.click(within(shippingRow).getByRole("button", { name: "Edit" }));
+    fireEvent.click(within(shippingRow).getByRole("button", { name: "Yes" }));
+    expect(onDeliveryChoice).toHaveBeenCalledWith("shipping", true);
+
+    const doorPickupRow = screen.getByText("Door pickup").closest("li") as HTMLElement;
+    fireEvent.click(within(doorPickupRow).getByRole("button", { name: "Edit" }));
+    fireEvent.click(within(doorPickupRow).getByRole("button", { name: "No" }));
+    expect(onDeliveryChoice).toHaveBeenCalledWith("doorPickup", false);
   });
 });

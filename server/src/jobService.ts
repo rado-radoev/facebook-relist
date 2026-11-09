@@ -66,6 +66,13 @@ export class ActiveJobExistsError extends Error {
   }
 }
 
+export class CloneChangedError extends Error {
+  constructor() {
+    super("The clone check changed after acknowledgement; save the current version before recreating.");
+    this.name = "CloneChangedError";
+  }
+}
+
 export interface JobServiceOptions {
   /** Captured onto each job at creation (server config: RELIST_DRY_RUN). */
   dryRun: boolean;
@@ -140,7 +147,7 @@ export class JobService {
 
   // -- Creation -----------------------------------------------------------
 
-  async createJob(userId: string, listingId: string): Promise<RecreateJob> {
+  async createJob(userId: string, listingId: string, expectedRevision?: number): Promise<RecreateJob> {
     const key = `${userId}:${listingId}`;
     const existing = this.inFlightCreates.get(key);
     if (existing) {
@@ -154,7 +161,7 @@ export class JobService {
     const run = (async () => {
       await previous;
       try {
-        const create = () => this.createJobOnce(userId, listingId);
+        const create = () => this.createJobOnce(userId, listingId, expectedRevision);
         return this.options.withUserOperation
           ? await this.options.withUserOperation(userId, create)
           : await create();
@@ -173,7 +180,7 @@ export class JobService {
     }
   }
 
-  private async createJobOnce(userId: string, listingId: string): Promise<RecreateJob> {
+  private async createJobOnce(userId: string, listingId: string, expectedRevision?: number): Promise<RecreateJob> {
     const existingForListing = this.store.listJobs(userId).find((entry) => entry.listingId === listingId);
     if (existingForListing) {
       return existingForListing;
@@ -186,6 +193,9 @@ export class JobService {
     const clone = this.store.getClone(userId, listingId);
     if (!clone || !clone.recovery) {
       throw new CloneNotFoundError(listingId);
+    }
+    if (expectedRevision !== undefined && expectedRevision !== (clone.revision ?? 0)) {
+      throw new CloneChangedError();
     }
     if (clone.recovery.listingId !== listingId) {
       throw new JobIncompleteError(["clone_listing_identity"]);

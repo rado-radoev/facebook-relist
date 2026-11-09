@@ -244,6 +244,17 @@ describe("resolveJobData", () => {
     expect(resolved.missing).toContain("delivery.meetup");
   });
 
+  it("does not fall back to recovered delivery values after explicit null edits", () => {
+    const clone = storedClone({ picks: { condition: "New" } });
+    Object.assign(clone, {
+      deliveryEdits: { shipping: null, meetup: { public: null } },
+    });
+    const resolved = resolveJobData(clone);
+    expect(resolved.data).toBeNull();
+    expect(resolved.missing).toContain("delivery.shipping");
+    expect(resolved.missing).toContain("delivery.meetup");
+  });
+
   it("does not treat unknown attributes as an empty recovered set", () => {
     const clone = storedClone({ picks: { condition: "New" } });
     clone.recovery!.attributes = missing("Attributes were unreadable.");

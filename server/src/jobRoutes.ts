@@ -9,6 +9,7 @@ import { makeRequireAuth } from "./auth.js";
 import type { BrowserManager } from "./browserManager.js";
 import {
   ActiveJobExistsError,
+  CloneChangedError,
   CloneNotFoundError,
   JobIncompleteError,
   type JobService,
@@ -35,13 +36,23 @@ export function registerJobRoutes(
         return;
       }
       const { id } = request.params as { id: string };
+      const body = request.body;
+      if (body !== undefined && (typeof body !== "object" || body === null || Array.isArray(body))) {
+        await reply.code(400).send({ error: "Invalid job payload" });
+        return;
+      }
+      const revision = body === undefined ? undefined : (body as Record<string, unknown>).revision;
+      if (revision !== undefined && (!Number.isInteger(revision) || (revision as number) < 0)) {
+        await reply.code(400).send({ error: "Invalid clone revision" });
+        return;
+      }
       if (browser.statusOf(user.id) !== "connected") {
         await reply.code(409).send({ error: "Connect Facebook before recreating a listing" });
         return;
       }
       const prior = jobs.listJobs(user.id).find((entry) => entry.listingId === id);
       try {
-        const job = await jobs.createJob(user.id, id);
+        const job = await jobs.createJob(user.id, id, revision as number | undefined);
         // Kick the runner in the background; the client polls the job.
         if (!prior) {
           void jobs.processJob(user.id, job.id);
@@ -60,6 +71,10 @@ export function registerJobRoutes(
         }
         if (error instanceof JobIncompleteError) {
           await reply.code(400).send({ error: error.message, missing: error.missing });
+          return;
+        }
+        if (error instanceof CloneChangedError) {
+          await reply.code(409).send({ error: error.message });
           return;
         }
         if (error instanceof ActiveJobExistsError) {

@@ -15,6 +15,7 @@ import path from "node:path";
 import type {
   CloneEdits,
   ClonePicks,
+  DeliveryEdits,
   StoredClone,
   SyncedListing,
 } from "./cloneTypes.js";
@@ -41,6 +42,13 @@ export interface SessionRecord {
   userId: string;
   createdAt: string;
   expiresAt: string;
+}
+
+export class CloneRevisionConflictError extends Error {
+  constructor(readonly expected: number, readonly current: number) {
+    super("The clone check changed since it was loaded; reload before saving or recreating.");
+    this.name = "CloneRevisionConflictError";
+  }
 }
 
 interface StoreData {
@@ -337,7 +345,8 @@ export class Store {
   async saveClone(userId: string, listingId: string, record: StoredClone): Promise<void> {
     this.ensureLoaded();
     const perUser = this.data.clones[userId] ?? {};
-    perUser[listingId] = record;
+    const previous = perUser[listingId];
+    perUser[listingId] = { ...record, revision: (previous?.revision ?? record.revision ?? 0) + 1 };
     this.data.clones[userId] = perUser;
     await this.save();
   }
@@ -347,14 +356,20 @@ export class Store {
   async saveClonePicks(
     userId: string,
     listingId: string,
-    input: { picks: ClonePicks; edits: CloneEdits; photoSelection: string[] | null },
+    input: { picks: ClonePicks; edits: CloneEdits; deliveryEdits?: DeliveryEdits; photoSelection: string[] | null; expectedRevision?: number },
   ): Promise<StoredClone> {
     this.ensureLoaded();
     const existing = this.getClone(userId, listingId);
+    const currentRevision = existing?.revision ?? 0;
+    if (input.expectedRevision !== undefined && input.expectedRevision !== currentRevision) {
+      throw new CloneRevisionConflictError(input.expectedRevision, currentRevision);
+    }
     const record: StoredClone = {
       recovery: existing ? existing.recovery : null,
       picks: input.picks,
       edits: input.edits,
+      deliveryEdits: input.deliveryEdits ?? existing?.deliveryEdits ?? {},
+      revision: currentRevision + 1,
       photoSelection: input.photoSelection,
       updatedAt: new Date().toISOString(),
     };

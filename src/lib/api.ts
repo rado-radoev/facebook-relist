@@ -5,6 +5,7 @@
 import type {
   CloneEdits,
   ClonePicks,
+  DeliveryEdits,
   JobHistoryEntry,
   RecreateJob,
   SessionStatus,
@@ -151,7 +152,7 @@ export async function recoverClone(listingId: string): Promise<StoredClone> {
 
 export async function saveClonePicks(
   listingId: string,
-  input: { picks: ClonePicks; edits: CloneEdits; photoSelection: string[] | null },
+  input: { picks: ClonePicks; edits: CloneEdits; deliveryEdits?: DeliveryEdits; photoSelection: string[] | null; revision?: number },
 ): Promise<StoredClone> {
   const data = await request<{ clone: StoredClone }>(`/api/listings/${listingId}/clone/picks`, {
     method: "PUT",
@@ -166,9 +167,10 @@ export async function saveClonePicks(
 /** Start a recreate job for one of the person's own synced listings.
  *  The backend refuses (400) while any clone field is still missing,
  *  and (409) while another job is active for the account. */
-export async function createJob(listingId: string): Promise<RecreateJob> {
+export async function createJob(listingId: string, revision?: number): Promise<RecreateJob> {
   const data = await request<{ job: RecreateJob }>(`/api/listings/${listingId}/jobs`, {
     method: "POST",
+    body: JSON.stringify({ revision }),
   });
   return data.job;
 }

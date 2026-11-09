@@ -78,7 +78,7 @@ afterEach(() => {
 });
 
 describe("DetailScreen persistence", () => {
-  it("persists archive photo order and blocks recreate while the job consumer still reorders it", async () => {
+  it("persists reordered media and starts a job with the saved selection", async () => {
     const completeClone: StoredClone = {
       ...stored,
       recovery: {
@@ -110,6 +110,7 @@ describe("DetailScreen persistence", () => {
       photoSelection: null,
     };
     api.fetchClone.mockResolvedValue(completeClone);
+    api.createJob.mockResolvedValue({ id: "job-1" });
     api.fetchArchivedPhotoUrl.mockImplementation(async (_listingId: string, index: number) => `blob:photo-${index}`);
     api.saveClonePicks.mockImplementation(async (_listingId, input) => ({
       ...completeClone,
@@ -138,14 +139,46 @@ describe("DetailScreen persistence", () => {
     await waitFor(() => expect(api.saveClonePicks).toHaveBeenCalledWith("listing-1", expect.objectContaining({
       photoSelection: ["photo-2.jpg", "photo-1.jpg"],
     })));
-    expect(await screen.findByText(/recreate job currently uploads those photos in archive order/i)).toBeTruthy();
-    expect(screen.getByRole("button", { name: "Recreate listing" }).hasAttribute("disabled")).toBe(true);
+    const recreate = screen.getByRole("button", { name: "Recreate listing" });
+    await waitFor(() => expect(recreate.hasAttribute("disabled")).toBe(false));
+    fireEvent.click(recreate);
+    await waitFor(() => expect(api.createJob).toHaveBeenCalledWith("listing-1", 0));
+  });
 
-    fireEvent.click(screen.getByRole("button", { name: "Move Photo 2 down" }));
-    await waitFor(() => expect(api.saveClonePicks).toHaveBeenLastCalledWith("listing-1", expect.objectContaining({
-      photoSelection: ["photo-1.jpg", "photo-2.jpg"],
-    })));
-    expect(screen.queryByText(/recreate job currently uploads those photos in archive order/i)).toBeNull();
+  it("surfaces a clone-changed conflict instead of starting the recreate", async () => {
+    const completeClone: StoredClone = {
+      ...stored,
+      recovery: {
+        ...stored.recovery!,
+        condition: { value: "Used - Good", source: "edit_form", reason: null },
+        photos: {
+          urls: ["https://example.invalid/photo"],
+          files: ["photo-1.jpg"],
+          downloaded: 1,
+          expectedCount: 1,
+          complete: true,
+          identities: ["sha256-one"],
+          reasons: [null],
+        },
+      },
+      revision: 3,
+    };
+    api.fetchClone.mockResolvedValue(completeClone);
+    api.fetchArchivedPhotoUrl.mockResolvedValue("blob:archived-photo");
+    api.saveClonePicks.mockImplementation(async (_listingId, input) => ({ ...completeClone, ...input }));
+    const conflict = new api.ApiError("The clone check changed after acknowledgement; save the current version before recreating.");
+    conflict.status = 409;
+    api.createJob.mockRejectedValue(conflict);
+    const onRecreate = vi.fn();
+
+    render(<DetailScreen listing={listing} facebookConnected onBack={vi.fn()} onRecreate={onRecreate} />);
+
+    const recreate = await screen.findByRole("button", { name: "Recreate listing" });
+    await waitFor(() => expect(recreate.hasAttribute("disabled")).toBe(false));
+    fireEvent.click(recreate);
+    expect(await screen.findByText(/clone check changed after acknowledgement/i)).toBeTruthy();
+    expect(api.createJob).toHaveBeenCalledWith("listing-1", 3);
+    expect(onRecreate).not.toHaveBeenCalled();
   });
 
   it("offers a pick when a field is explicitly unknown", async () => {
@@ -171,6 +204,22 @@ describe("DetailScreen persistence", () => {
     fireEvent.click(await screen.findByRole("button", { name: "Toys & Games" }));
     await waitFor(() => expect(api.saveClonePicks).toHaveBeenCalledWith("listing-1", expect.objectContaining({
       picks: expect.objectContaining({ category: "Toys & Games" }),
+    })));
+  });
+
+  it("edits shipping as a structured saved choice", async () => {
+    api.fetchClone.mockResolvedValue(stored);
+    api.fetchArchivedPhotoUrl.mockResolvedValue("blob:archived-photo");
+    api.saveClonePicks.mockImplementation(async (_listingId, input) => ({ ...stored, ...input }));
+
+    render(<DetailScreen listing={listing} facebookConnected onBack={vi.fn()} onRecreate={vi.fn()} />);
+
+    const shippingRow = (await screen.findByText("Shipping")).closest("li");
+    expect(shippingRow).not.toBeNull();
+    fireEvent.click(within(shippingRow as HTMLElement).getByRole("button", { name: "Edit" }));
+    fireEvent.click(within(shippingRow as HTMLElement).getByRole("button", { name: "Yes" }));
+    await waitFor(() => expect(api.saveClonePicks).toHaveBeenCalledWith("listing-1", expect.objectContaining({
+      deliveryEdits: expect.objectContaining({ shipping: true }),
     })));
   });
 
