@@ -13,7 +13,7 @@ import { isIP } from "node:net";
 import { request as httpsRequest } from "node:https";
 import { spawn } from "node:child_process";
 import path from "node:path";
-import sharp from "sharp";
+import { decodeImageInfo, type ImageDecodeDeps } from "./imageDecode.js";
 import type {
   CloneRecovery,
   PhotoRecovery,
@@ -185,18 +185,18 @@ function mediaContentType(data: Buffer): string | null {
   return (data as Buffer & { contentType?: string }).contentType ?? null;
 }
 
-async function validateImage(data: Buffer): Promise<{ extension: string; format: string }> {
+export async function validateImage(data: Buffer, deps: ImageDecodeDeps = {}): Promise<{ extension: string; format: string }> {
   if (!data.length || data.length > MAX_MEDIA_BYTES) throw new Error("Image is empty or exceeds the 25 MB limit");
-  const decoded = await sharp(data, { limitInputPixels: 40_000_000, failOn: "error" }).rotate().toBuffer({ resolveWithObject: true });
+  const info = await decodeImageInfo(data, deps);
   const formats: Record<string, { extension: string; contentType: string }> = {
     jpeg: { extension: "jpg", contentType: "image/jpeg" },
     png: { extension: "png", contentType: "image/png" },
     webp: { extension: "webp", contentType: "image/webp" },
     gif: { extension: "gif", contentType: "image/gif" },
   };
-  const format = decoded.info.format;
+  const format = info.format;
   const supported = formats[format];
-  if (!supported || decoded.info.width < 1 || decoded.info.height < 1) throw new Error("Downloaded content is not a supported, decodable image");
+  if (!supported || info.width < 1 || info.height < 1) throw new Error("Downloaded content is not a supported, decodable image");
   const declared = mediaContentType(data);
   if (declared && declared !== supported.contentType) throw new Error("Image media type does not match decoded bytes");
   return { extension: supported.extension, format };
@@ -235,6 +235,7 @@ async function recoverPhotos(
   gallery: PageSnapshot["gallery"],
   downloader: FileDownloader,
   archive: ArchiveWriter,
+  imageDeps: ImageDecodeDeps = {},
 ): Promise<PhotoRecovery> {
   const files: Array<string | null> = [];
   const reasons: Array<string | null> = [];
@@ -248,7 +249,7 @@ async function recoverPhotos(
   for (const [index, url] of urls.entries()) {
     try {
       const data = await downloader(url);
-      const { extension } = await validateImage(data);
+      const { extension } = await validateImage(data, imageDeps);
       const identity = gallery.slots[index].identity;
       const fileName = `photo-${createHash("sha256").update(identity).update(data).digest("hex")}.${extension}`;
       await archive.save(fileName, data);
@@ -308,6 +309,7 @@ export async function recoverCloneData(
   downloader: FileDownloader,
   archive: ArchiveWriter,
   now: Date = new Date(),
+  imageDeps: ImageDecodeDeps = {},
 ): Promise<CloneRecovery> {
   if (input.listing.surface?.kind !== "listing" || input.listing.surface.readiness !== "ready" || input.listing.surface.listingId !== listingId) {
     throw new Error("The listing surface identity or readiness does not match the requested listing");
@@ -326,7 +328,7 @@ export async function recoverCloneData(
   const edit = input.editStep1 ? parseEditForm(input.editStep1, input.editStep2) : null;
   const details = parseListingDetails(input.listing);
   const fields = buildCloneFields(edit, details);
-  const photos = await recoverPhotos(urls, gallery, downloader, archive);
+  const photos = await recoverPhotos(urls, gallery, downloader, archive, imageDeps);
   const video = await recoverVideo(input.listing.videos, gallery.videoPresence, downloader, archive);
 
   return {

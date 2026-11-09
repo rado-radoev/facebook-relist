@@ -363,6 +363,12 @@ survives rebuilds and restarts. Back it up with
 delete nothing real until `RELIST_DRY_RUN=0` is set in `.env` for a
 supervised live run.
 
+**Older CPUs (no x86-64-v2):** the backend still runs. Photo
+validation's primary decoder (sharp) cannot load on such CPUs, so
+validation automatically falls back to ffprobe; only photo recovery is
+affected, and only for hosts missing both. Setting the VM's CPU type
+to **host** in the hypervisor restores the primary decoder.
+
 **Home network only.** Do not port-forward these ports, put them on a
 public URL, or otherwise expose them beyond the home network — the app
 has no gate beyond its own sign-in, and whoever can reach it can drive
