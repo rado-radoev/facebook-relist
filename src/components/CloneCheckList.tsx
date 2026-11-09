@@ -5,7 +5,7 @@ import { attributesToText } from "../lib/cloneMapping";
 import type { PhotoTile } from "../lib/photos";
 import PhotoEditor from "./PhotoEditor";
 
-export type CheckState = "ok" | "warn" | "unknown" | "missing";
+export type CheckState = "ok" | "warn" | "unknown" | "missing" | "not_applicable";
 
 /** Fields the person can edit in the clone preview — all of them. */
 export type EditableField =
@@ -31,8 +31,21 @@ export interface CheckRow {
   editor?: "options" | "text" | "textarea" | "photos";
 }
 
+function missingReason(listing: Listing, field: keyof NonNullable<Listing["recoveryReasons"]>): string {
+  return listing.recoveryReasons?.[field] ?? "The backend did not return this field; review and supply a value.";
+}
+
+function fieldState(listing: Listing, field: keyof NonNullable<Listing["fieldStates"]>, value: string): CheckState {
+  const state = listing.fieldStates?.[field];
+  if (state === "not_applicable") return "not_applicable";
+  if (state === "unknown") return "unknown";
+  if (state === "missing" || !value.trim()) return "missing";
+  return "ok";
+}
+
 function categoryRow(listing: Listing): CheckRow {
-  if (listing.category) {
+  const state = fieldState(listing, "category", listing.category ?? "");
+  if (state === "ok") {
     return {
       label: "Category",
       value: `${listing.category} (stored value)`,
@@ -43,23 +56,22 @@ function categoryRow(listing: Listing): CheckRow {
   }
   return {
     label: "Category",
-    value: "Not recovered — pick the category:",
-    state: "missing",
-    field: "category",
+    value: state === "not_applicable"
+      ? "Category is not applicable for this listing."
+      : listing.recoveryReasons?.category ?? "Category was not recovered — choose the value:",
+    state,
+    field: state === "not_applicable" ? undefined : "category",
   };
 }
 
 function conditionRow(listing: Listing): CheckRow {
-  if (listing.conditionFlag) {
-    // Facebook shows this listing's condition nowhere (its edit form is
-    // empty and the listing page itself carries Facebook's "add info
-    // about condition" prompt), so it cannot be recovered. Never just a
-    // warning: the person picks from Facebook's real condition values.
+  const state = listing.conditionFlag ? "missing" : fieldState(listing, "condition", listing.condition);
+  if (state !== "ok") {
     return {
       label: "Condition",
-      value: "Facebook doesn't have it for this listing — pick the condition:",
-      state: "missing",
-      field: "condition",
+      value: listing.conditionFlag ?? listing.recoveryReasons?.condition ?? "Condition was not recovered — choose the value:",
+      state,
+      field: state === "not_applicable" ? undefined : "condition",
     };
   }
   return { label: "Condition", value: listing.condition, state: "ok", editField: "condition", editor: "options" };
@@ -80,98 +92,208 @@ function videoSuffix(listing: Listing): string {
 
 function photosRow(listing: Listing): CheckRow {
   if (listing.photoCount !== null) {
-    const downloaded = listing.photosDownloaded ?? listing.photoCount;
+    const downloaded = listing.photosDownloaded ?? (listing.source === "synced" ? 0 : listing.photoCount);
+    const completeEvidence = listing.source !== "synced"
+      ? true
+      : listing.photoCompleteness === "complete" && listing.photoExpectedCount === listing.photoCount;
+    const allDownloaded = completeEvidence && downloaded === listing.photoCount && listing.fieldStates?.photos !== "missing";
     let value = `${downloaded} of ${listing.photoCount} downloaded`;
+    if (!allDownloaded) {
+      const slotReasons = listing.photoReasons?.flatMap((reason, index) => reason ? [`Photo ${index + 1}: ${reason}`] : []) ?? [];
+      value += ` — ${slotReasons.join(" ") || missingReason(listing, "photos")}`;
+    }
     value += videoSuffix(listing);
-    return { label: "Photos", value, state: "ok", editField: "photos", editor: "photos" };
+    return {
+      label: "Photos",
+      value,
+      state: allDownloaded
+        ? "ok"
+        : downloaded < listing.photoCount
+          ? "missing"
+          : listing.photoCompleteness === "unknown" || listing.photoCompleteness === undefined
+            ? "unknown"
+            : "missing",
+      editField: "photos",
+      editor: "photos",
+    };
   }
   return {
     label: "Photos",
-    value: "Not counted yet — the backend downloads all of them",
+    value: missingReason(listing, "photos"),
     state: "unknown",
     editField: "photos",
     editor: "photos",
   };
 }
 
-function deliveryRow(listing: Listing): CheckRow {
-  if (!listing.delivery) {
-    return {
-      label: "Delivery",
-      value: "Not recovered — pick the delivery:",
+function deliveryRows(listing: Listing): CheckRow[] {
+  const details = listing.deliveryInfo;
+  const typeKnown = Boolean(details?.type);
+  const shippingKnown = details?.shipping !== null && details?.shipping !== undefined;
+  const rows: CheckRow[] = [
+    {
+      label: "Delivery type",
+      value: typeKnown ? details?.type as string : listing.recoveryReasons?.delivery ?? "Delivery type was not recovered; choose an available delivery option:",
+      state: typeKnown ? "ok" : listing.fieldStates?.delivery === "unknown" ? "unknown" : "missing",
+      field: typeKnown ? undefined : "delivery",
+      editField: typeKnown ? "delivery" : undefined,
+      editor: typeKnown ? "text" : undefined,
+    },
+    {
+      label: "Shipping",
+      value: shippingKnown ? (details?.shipping ? "Offered" : "Not offered") : listing.recoveryReasons?.delivery ?? "Shipping status was not returned by the backend.",
+      state: shippingKnown ? "ok" : "unknown",
+    },
+  ];
+  const meetupOptions = [
+    ["Public meetup", details?.meetup?.public],
+    ["Door pickup", details?.meetup?.doorPickup],
+    ["Door dropoff", details?.meetup?.doorDropoff],
+  ] as const;
+  for (const [label, value] of meetupOptions) {
+    rows.push({
+      label,
+      value: value === null || value === undefined
+        ? `Unknown — ${listing.recoveryReasons?.delivery ?? "this meetup option was not observed by the backend."}`
+        : value ? "Selected" : "Not selected",
+      state: value === null || value === undefined ? "unknown" : "ok",
+    });
+  }
+  if (!shippingKnown || meetupOptions.some(([, value]) => value === null || value === undefined)) {
+    rows.push({
+      label: "Delivery editing",
+      value: "Shipping and meetup choices cannot be edited or saved by the current backend contract; recreating with these subfields unknown is blocked.",
       state: "missing",
-      field: "delivery",
-    };
+    });
   }
-  if (listing.delivery.startsWith("Not readable")) {
-    return {
-      label: "Delivery",
-      value: "Facebook's edit form was blocked — pick the delivery:",
-      state: "missing",
-      field: "delivery",
-    };
-  }
-  let value = listing.delivery;
-  if (listing.shipping) {
-    value += ` · Shipping: ${listing.shipping}`;
-  }
-  if (listing.meetup) {
-    const chosen: string[] = [];
-    if (listing.meetup.public) {
-      chosen.push("Public meetup");
-    }
-    if (listing.meetup.doorPickup) {
-      chosen.push("Door pickup");
-    }
-    if (listing.meetup.doorDropoff) {
-      chosen.push("Door dropoff");
-    }
-    value += chosen.length > 0 ? ` · Meetup: ${chosen.join(", ")}` : " · No meetup options set";
-  }
-  return { label: "Delivery", value, state: "ok", editField: "delivery", editor: "options" };
+  return rows;
 }
 
 function attributesRow(listing: Listing): CheckRow | null {
-  if (!listing.attributes || Object.keys(listing.attributes).length === 0) {
-    return null;
+  const state = listing.fieldStates?.attributes;
+  if (state === "not_applicable") {
+    return {
+      label: "Attributes",
+      value: "No category-specific attributes apply to this listing.",
+      state: "not_applicable",
+      editField: "attributes",
+      editor: "textarea",
+    };
   }
-  return {
-    label: "Attributes",
-    value: attributesToText(listing.attributes),
-    state: "ok",
-    editField: "attributes",
-    editor: "textarea",
-  };
+  if (state === "recovered" && listing.attributes && Object.keys(listing.attributes).length === 0) {
+    return {
+      label: "Attributes",
+      value: "No attributes were present in the completed recovery.",
+      state: "ok",
+      editField: "attributes",
+      editor: "textarea",
+    };
+  }
+  if (listing.attributes && Object.keys(listing.attributes).length > 0) {
+    return {
+      label: "Attributes",
+      value: attributesToText(listing.attributes),
+      state: state === "missing" ? "missing" : state === "unknown" ? "unknown" : "ok",
+      editField: "attributes",
+      editor: "textarea",
+    };
+  }
+  if (state === "unknown" || state === "missing" || listing.recoveryReasons?.attributes) {
+    return {
+      label: "Attributes",
+      value: listing.recoveryReasons?.attributes ?? "Category attributes were not recovered; review and enter them.",
+      state: state === "unknown" ? "unknown" : "missing",
+      editField: "attributes",
+      editor: "textarea",
+    };
+  }
+  return null;
 }
 
 export function buildCloneCheck(listing: Listing): CheckRow[] {
+  const titleState = fieldState(listing, "title", listing.title);
+  const priceState = fieldState(listing, "price", listing.price);
+  const descriptionState = fieldState(listing, "description", listing.description);
+  const locationState = fieldState(listing, "location", listing.locationLabel);
   const rows: CheckRow[] = [
     {
       label: "Title",
-      value: listing.title.replace(/\s+/g, " ").trim(),
-      state: "ok",
+      value: titleState === "ok" ? listing.title.replace(/\s+/g, " ").trim() : listing.recoveryReasons?.title ?? "Title was not recovered; provide a title.",
+      state: titleState,
       editField: "title",
       editor: "text",
     },
-    { label: "Price", value: listing.price, state: "ok", editField: "price", editor: "text" },
+    {
+      label: "Price",
+      value: priceState === "ok" ? listing.price : listing.recoveryReasons?.price ?? "Price was not recovered; provide a price.",
+      state: priceState,
+      editField: "price",
+      editor: "text",
+    },
     {
       label: "Description",
-      value: listing.description.trim(),
-      state: "ok",
+      value: descriptionState === "ok" ? listing.description.trim() : listing.recoveryReasons?.description ?? "Description was not recovered; review and supply text.",
+      state: descriptionState,
       editField: "description",
       editor: "textarea",
     },
     categoryRow(listing),
     conditionRow(listing),
     photosRow(listing),
-    { label: "Location", value: listing.locationLabel, state: "ok", editField: "location", editor: "text" },
-    deliveryRow(listing),
+    {
+      label: "Location",
+      value: locationState === "ok" ? listing.locationLabel : listing.recoveryReasons?.location ?? "Location was not recovered; enter a location.",
+      state: locationState,
+      editField: "location",
+      editor: "text",
+    },
+    ...deliveryRows(listing),
   ];
   const attributes = attributesRow(listing);
   if (attributes) {
     rows.push(attributes);
+  } else if (listing.fieldStates?.attributes === "missing") {
+    rows.push({
+      label: "Attributes",
+      value: missingReason(listing, "attributes"),
+      state: "missing",
+      editField: "attributes",
+      editor: "textarea",
+    });
+  }
+  if (listing.videoPresence === "unknown" || listing.videoState === "unknown" || listing.fieldStates?.video === "unknown") {
+    rows.push({
+      label: "Video",
+      value: listing.videoReason ?? missingReason(listing, "video"),
+      state: "unknown",
+    });
+  } else if (listing.videoPresence === "present" || listing.videoCount > 0) {
+    const videoRecovered = listing.fieldStates?.video !== "missing" && listing.videoState === "recovered";
+    rows.push({
+      label: "Video",
+      value: videoRecovered
+        ? `${listing.videoCount || 1} video downloaded to the archive`
+        : listing.videoReason ?? missingReason(listing, "video"),
+      state: videoRecovered ? "ok" : "missing",
+    });
   }
   return rows;
+}
+
+export function unresolvedApprovalRows(
+  listing: Listing,
+  picks: FieldPicks,
+  overrides: FieldOverrides = {},
+): CheckRow[] {
+  return buildCloneCheck(listing).filter((row) => {
+    if (row.state === "ok" || row.state === "not_applicable" || (row.field && picks[row.field])) {
+      return false;
+    }
+    if (row.editField && overrides[row.editField]?.trim()) {
+      return false;
+    }
+    return true;
+  });
 }
 
 /** Fields the person still has to supply before this listing can recreate. */
@@ -190,6 +312,7 @@ const STATE_ICON: Record<CheckState, string> = {
   warn: "⚠️",
   unknown: "•",
   missing: "⚠️",
+  not_applicable: "—",
 };
 
 interface Props {
@@ -201,6 +324,9 @@ interface Props {
   photoTiles: PhotoTile[];
   photosEdited: boolean;
   onPhotoTilesChange: (tiles: PhotoTile[]) => void;
+  canEditPhotos: boolean;
+  canAddReplacePhotos: boolean;
+  saveState: "loading" | "idle" | "pending" | "saved" | "error";
 }
 
 export default function CloneCheckList({
@@ -212,6 +338,9 @@ export default function CloneCheckList({
   photoTiles,
   photosEdited,
   onPhotoTilesChange,
+  canEditPhotos,
+  canAddReplacePhotos,
+  saveState,
 }: Props) {
   const rows = buildCloneCheck(listing);
   const [editing, setEditing] = useState<EditableField | null>(null);
@@ -235,9 +364,9 @@ export default function CloneCheckList({
   function renderMissingRow(row: CheckRow) {
     const field = row.field as PickableField;
     return (
-      <li key={row.label} className="check-row check-missing">
+      <li key={row.label} className={`check-row check-${row.state}`}>
         <span className="check-icon" aria-hidden="true">
-          {STATE_ICON.missing}
+          {STATE_ICON[row.state]}
         </span>
         <span className="check-body">
           <span className="check-label">{row.label}</span>
@@ -255,14 +384,27 @@ export default function CloneCheckList({
   }
 
   function renderPickedRow(row: CheckRow, pick: string) {
+    const field = row.field as PickableField;
+    const isEditing = editing === field;
     return (
-      <li key={row.label} className="check-row check-ok">
-        <span className="check-icon" aria-hidden="true">
-          {STATE_ICON.ok}
-        </span>
+      <li key={row.label} className={`check-row ${saveState === "saved" ? "check-ok" : "check-warn"}`}>
+        <span className="check-icon" aria-hidden="true">{STATE_ICON[saveState === "saved" ? "ok" : "warn"]}</span>
         <span className="check-body">
           <span className="check-label">{row.label}</span>
-          <span className="check-value">{pick} (your pick — saved for this listing)</span>
+          <span className="check-value">{pick}{saveState === "saved" ? " (saved for this listing)" : " (your pick)"}</span>
+          {isEditing ? (
+            <span className="check-picker" role="group" aria-label={`Change the ${row.label.toLowerCase()}`}>
+              {FIELD_OPTIONS[field].map((option) => (
+                <button key={option} type="button" className="check-chip" onClick={() => {
+                  onPick(field, option);
+                  setEditing(null);
+                }}>{option}</button>
+              ))}
+              <button type="button" className="check-chip check-chip-cancel" onClick={() => setEditing(null)}>Cancel</button>
+            </span>
+          ) : (
+            <button type="button" className="edit-button" onClick={() => setEditing(field)}>Edit pick</button>
+          )}
         </span>
       </li>
     );
@@ -270,15 +412,20 @@ export default function CloneCheckList({
 
   function renderPhotosRow(row: CheckRow) {
     const isEditing = editing === "photos";
+    const unreadableTiles = photoTiles.filter((tile) => tile.origin === "original" && !tile.src);
+    const state = unreadableTiles.length > 0 ? "missing" : row.state;
     let value = row.value;
+    if (unreadableTiles.length > 0) {
+      value += ` — ${unreadableTiles.map((tile) => tile.label).join("; ")}`;
+    }
     if (photosEdited) {
       value = `${photoTiles.length} photo${photoTiles.length === 1 ? "" : "s"} selected for the clone`;
       value += videoSuffix(listing);
     }
     return (
-      <li key={row.label} className={`check-row check-${row.state}`}>
+      <li key={row.label} className={`check-row check-${state}`}>
         <span className="check-icon" aria-hidden="true">
-          {STATE_ICON[row.state]}
+          {STATE_ICON[state]}
         </span>
         <span className="check-body">
           <span className="check-label">
@@ -286,18 +433,22 @@ export default function CloneCheckList({
             {photosEdited ? <span className="edited-tag">Edited</span> : null}
           </span>
           <span className="check-value">{value}</span>
-          {isEditing ? (
-            <PhotoEditor tiles={photoTiles} onChange={onPhotoTilesChange} />
+          {canEditPhotos && isEditing ? (
+            <PhotoEditor tiles={photoTiles} onChange={onPhotoTilesChange} canAddReplace={canAddReplacePhotos} />
           ) : null}
-          {!isEditing ? (
+          {!canAddReplacePhotos ? (
+            <span className="check-value">Adding or replacing photos is unavailable because this backend only stores recovered archive files. Recovered photos can be reordered or removed.</span>
+          ) : null}
+          {!isEditing && canEditPhotos ? (
             <button type="button" className="edit-button" onClick={() => setEditing("photos")}>
               Edit
             </button>
-          ) : (
+          ) : null}
+          {isEditing && canEditPhotos ? (
             <button type="button" className="edit-button" onClick={() => setEditing(null)}>
               Done
             </button>
-          )}
+          ) : null}
         </span>
       </li>
     );
@@ -402,10 +553,10 @@ export default function CloneCheckList({
       <ul className="check-list">
         {rows.map((row) => {
           const pick = row.field ? picks[row.field] : undefined;
-          if (row.state === "missing" && row.field && !pick) {
+          if ((row.state === "missing" || row.state === "unknown") && row.field && !pick) {
             return renderMissingRow(row);
           }
-          if (row.state === "missing" && pick) {
+          if ((row.state === "missing" || row.state === "unknown") && row.field && pick) {
             return renderPickedRow(row, pick);
           }
           if (row.editField === "photos") {

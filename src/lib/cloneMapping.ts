@@ -32,42 +32,22 @@ export function syncedToListing(synced: SyncedListing, accountId: string): Listi
   };
 }
 
-function deliveryLabel(recovery: CloneRecovery): string | null {
-  const delivery = recovery.delivery.value;
-  if (!delivery) {
-    return recovery.step2Blocked ? "Not readable for this listing (edit form blocked)" : null;
-  }
-  return delivery.type;
-}
-
 export function applyClone(listing: Listing, clone: StoredClone): Listing {
   const recovery = clone.recovery;
   if (!recovery) {
     return listing;
   }
   const merged: Listing = { ...listing };
-  if (recovery.title.value) {
-    merged.title = recovery.title.value;
-  }
-  if (recovery.price.value) {
-    merged.price = recovery.price.value;
-  }
-  if (recovery.description.value) {
-    merged.description = recovery.description.value;
-  }
+  merged.title = recovery.title.value ?? "";
+  merged.price = recovery.price.value ?? "";
+  merged.description = recovery.description.value ?? "";
   merged.category = recovery.category.value;
-  if (recovery.condition.value) {
-    merged.condition = recovery.condition.value;
-    merged.conditionFlag = null;
-  } else {
-    merged.condition = "";
-    merged.conditionFlag = recovery.condition.reason ?? "Condition could not be recovered";
-  }
-  if (recovery.location.value) {
-    merged.location = recovery.location.value;
-    merged.locationLabel = recovery.location.value;
-  }
-  merged.delivery = deliveryLabel(recovery);
+  merged.condition = recovery.condition.value ?? "";
+  merged.conditionFlag = recovery.condition.value ? null : recovery.condition.reason ?? "Condition was not recovered";
+  merged.location = recovery.location.value ?? "";
+  merged.locationLabel = recovery.location.value ?? "";
+  merged.deliveryInfo = recovery.delivery.value;
+  merged.delivery = recovery.delivery.value?.type ?? null;
   const delivery = recovery.delivery.value;
   if (delivery) {
     if (delivery.shipping !== null) {
@@ -77,13 +57,59 @@ export function applyClone(listing: Listing, clone: StoredClone): Listing {
       merged.meetup = delivery.meetup;
     }
   }
-  if (recovery.attributes.value) {
-    merged.attributes = recovery.attributes.value;
-  }
-  merged.photoCount = recovery.photos.urls.length;
+  merged.attributes = recovery.attributes.value ?? undefined;
+  merged.recoveryReasons = {
+    title: recovery.title.reason ?? (!recovery.title.value?.trim() ? "Facebook returned an empty title; provide a title before continuing." : undefined),
+    price: recovery.price.reason ?? (!recovery.price.value?.trim() ? "Facebook returned an empty price; provide a price before continuing." : undefined),
+    description: recovery.description.reason ?? (!recovery.description.value?.trim() ? "Facebook returned an empty description; provide text before continuing." : undefined),
+    category: recovery.category.reason ?? undefined,
+    condition: recovery.condition.reason ?? undefined,
+    location: recovery.location.reason ?? (!recovery.location.value?.trim() ? "Facebook returned no location text; enter a location before continuing." : undefined),
+    delivery: recovery.delivery.reason ?? undefined,
+    attributes: recovery.attributes.reason ?? undefined,
+    photos: recovery.photos.files.some((file, index) => !file
+      ? `Photo ${index + 1} has no downloaded archive file; the backend did not provide a per-photo failure reason.`
+      : false) ? "One or more photo archive slots could not be downloaded; see each photo tile for its slot." : undefined,
+    video: recovery.video.reason ?? undefined,
+  };
+  merged.fieldStates = {
+    title: recovery.title.state ?? (recovery.title.value === null ? "missing" : "recovered"),
+    price: recovery.price.state ?? (recovery.price.value === null ? "missing" : "recovered"),
+    description: recovery.description.state ?? (recovery.description.value === null ? "missing" : "recovered"),
+    category: recovery.category.state ?? (recovery.category.value === null ? "missing" : "recovered"),
+    condition: recovery.condition.state ?? (recovery.condition.value === null ? "missing" : "recovered"),
+    location: recovery.location.state ?? (recovery.location.value === null ? "missing" : "recovered"),
+    delivery: recovery.delivery.state ?? (recovery.delivery.value?.type ? "recovered" : "missing"),
+    attributes: recovery.attributes.state ?? (recovery.attributes.value === null ? "missing" : "recovered"),
+    photos: recovery.photos.complete === false || recovery.photos.files.some((file) => !file)
+      ? "missing"
+      : recovery.photos.complete === true && recovery.photos.expectedCount === recovery.photos.files.length && recovery.photos.downloaded === recovery.photos.files.length
+        ? "recovered"
+        : "unknown",
+    video: recovery.video.state === "unknown"
+      ? "unknown"
+      : recovery.video.state === "present_not_downloaded"
+        ? "missing"
+        : recovery.video.state === "none" && recovery.video.present === false
+          ? "not_applicable"
+          : recovery.video.state === "recovered" && recovery.video.present === true && recovery.video.file
+            ? "recovered"
+            : "unknown",
+  };
+  merged.videoReason = recovery.video.reason;
+  merged.photoCount = recovery.photos.expectedCount ?? (recovery.photos.complete === true ? recovery.photos.urls.length : null);
   merged.photosDownloaded = recovery.photos.downloaded;
-  merged.videoCount = recovery.video.present ? 1 : 0;
+  merged.photoReasons = recovery.photos.reasons ?? recovery.photos.files.map((file) => file ? null : "The backend did not include a reason for this unreadable photo slot.");
+  merged.photoCompleteness = recovery.photos.complete === true && recovery.photos.expectedCount === recovery.photos.files.length
+    ? "complete"
+    : recovery.photos.complete === false
+      ? "incomplete"
+      : "unknown";
+  merged.photoExpectedCount = recovery.photos.expectedCount ?? null;
+  merged.photoIdentities = recovery.photos.identities;
   merged.videoState = recovery.video.state;
+  merged.videoPresence = recovery.video.present === true ? "present" : recovery.video.present === false ? "absent" : "unknown";
+  merged.videoCount = recovery.video.present === true || recovery.video.state === "recovered" || recovery.video.state === "present_not_downloaded" ? 1 : 0;
   const firstUrl = recovery.photos.urls[0];
   if (firstUrl) {
     // The selling-list CDN url stays as the display photo; the archived

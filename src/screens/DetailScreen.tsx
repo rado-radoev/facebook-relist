@@ -14,6 +14,7 @@ import { initialPhotoTiles, tilesDiffer, type PhotoTile } from "../lib/photos";
 import StatusPill from "../components/StatusPill";
 import CloneCheckList, {
   missingFields,
+  unresolvedApprovalRows,
   type EditableField,
   type FieldOverrides,
 } from "../components/CloneCheckList";
@@ -106,24 +107,25 @@ function effectiveListing(
   return effective;
 }
 
-/** Photo tiles for a recovered clone, from the backend archive. Tiles
- *  whose download failed stay visible as failed slots — never dropped. */
+/** Photo tiles for a recovered clone, from the backend archive. */
 async function buildServerTiles(clone: StoredClone): Promise<PhotoTile[]> {
   const recovery = clone.recovery;
   if (!recovery) {
     return [];
   }
-  const selection = clone.photoSelection ? new Set(clone.photoSelection) : null;
+  const selection = clone.photoSelection;
+  const orderedFiles = selection
+    ? selection.map((fileName) => ({ fileName, index: recovery.photos.files.indexOf(fileName) }))
+        .filter(({ index }) => index >= 0)
+    : recovery.photos.files.map((fileName, index) => ({ fileName, index }));
   const tiles: PhotoTile[] = [];
-  for (const [index, fileName] of recovery.photos.files.entries()) {
-    if (selection && (!fileName || !selection.has(fileName))) {
-      continue;
-    }
+  for (const { fileName, index } of orderedFiles) {
     if (!fileName) {
+      const reason = recovery.photos.reasons?.[index] ?? "The backend did not include a per-photo download reason.";
       tiles.push({
         id: `missing-${index}`,
         src: null,
-        label: `Photo ${index + 1} — download failed`,
+        label: `Photo ${index + 1} — ${reason}`,
         origin: "original",
       });
       continue;
@@ -134,7 +136,15 @@ async function buildServerTiles(clone: StoredClone): Promise<PhotoTile[]> {
     } catch {
       src = null;
     }
-    tiles.push({ id: fileName, src, label: `Photo ${index + 1}`, origin: "original" });
+    const reason = recovery.photos.reasons?.[index] ?? "The backend did not include an archive read reason.";
+    tiles.push({
+      id: fileName,
+      src,
+      label: src
+        ? `Photo ${index + 1}`
+        : `Photo ${index + 1} — ${reason}`,
+      origin: "original",
+    });
   }
   return tiles;
 }
@@ -163,11 +173,29 @@ export default function DetailScreen({ listing, facebookConnected, onBack, onRec
     synced ? {} : loadJson<FieldOverrides>(storageKey("edits", listing.listing_id), {}),
   );
   const [photoTiles, setPhotoTiles] = useState<PhotoTile[] | null>(null);
+  const [persistReady, setPersistReady] = useState(!synced);
+  const [savingState, setSavingState] = useState<"loading" | "idle" | "pending" | "saved" | "error">("loading");
+  const [saveError, setSaveError] = useState<string | null>(null);
+  const saveQueue = useRef<Promise<void>>(Promise.resolve());
+  const saveVersion = useRef(0);
+  const stateRef = useRef<{
+    picks: FieldPicks;
+    overrides: FieldOverrides;
+    photoTiles: PhotoTile[] | null;
+    clone: StoredClone | null;
+  }>({ picks, overrides, photoTiles, clone });
+  stateRef.current = { picks, overrides, photoTiles, clone };
 
   const displayListing = clone?.recovery ? applyClone(listing, clone) : listing;
   const originalTiles = serverTiles ?? initialPhotoTiles(displayListing);
   const activeTiles = photoTiles ?? originalTiles;
   const photosEdited = photoTiles !== null && tilesDiffer(photoTiles, originalTiles);
+  const savedPhotoFiles = clone?.recovery?.photos.files.filter((file): file is string => Boolean(file)) ?? [];
+  const displayedPhotoOrder = activeTiles
+    .filter((tile) => tile.origin === "original" && savedPhotoFiles.includes(tile.id))
+    .map((tile) => tile.id);
+  const canonicalSelectedOrder = savedPhotoFiles.filter((file) => displayedPhotoOrder.includes(file));
+  const photoOrderUnsupported = displayedPhotoOrder.some((file, index) => file !== canonicalSelectedOrder[index]);
 
   useEffect(() => {
     if (!synced) {
@@ -197,6 +225,7 @@ export default function DetailScreen({ listing, facebookConnected, onBack, onRec
         if (!cancelled) {
           serverInitDone.current = true;
           setCloneLoaded(true);
+          setPersistReady(true);
         }
       }
     }
@@ -206,24 +235,43 @@ export default function DetailScreen({ listing, facebookConnected, onBack, onRec
     };
   }, [synced, listing.listing_id]);
 
-  // Persist picks/edits for synced listings (seed listings use the
-  // localStorage effects below instead).
+  function queueSave() {
+    if (!synced || !persistReady) return;
+    const snapshot = stateRef.current;
+    const version = ++saveVersion.current;
+    const selection = snapshot.photoTiles
+      ? snapshot.photoTiles.filter((tile) => tile.origin === "original").map((tile) => tile.id)
+      : (snapshot.clone?.photoSelection ?? null);
+    setSavingState("pending");
+    setSaveError(null);
+    const write = saveQueue.current
+      .catch(() => undefined)
+      .then(() => saveClonePicks(listing.listing_id, {
+        picks: snapshot.picks,
+        edits: snapshot.overrides,
+        photoSelection: selection,
+      }))
+      .then((saved) => {
+        if (version === saveVersion.current) {
+          setClone(saved);
+          setSavingState("saved");
+        }
+      })
+      .catch((error: unknown) => {
+        if (version === saveVersion.current) {
+          setSaveError(error instanceof Error ? error.message : "Could not save your clone check.");
+          setSavingState("error");
+        }
+      });
+    saveQueue.current = write;
+  }
+
+  // Persist only after initial values and archived media have loaded. The
+  // serialized queue prevents slower writes from replacing newer picks.
   useEffect(() => {
-    if (!synced || !serverInitDone.current) {
-      return;
-    }
-    const selection = photosEdited
-      ? activeTiles.filter((tile) => tile.origin === "original").map((tile) => tile.id)
-      : (clone?.photoSelection ?? null);
-    void saveClonePicks(listing.listing_id, {
-      picks,
-      edits: overrides,
-      photoSelection: selection,
-    }).catch(() => {
-      // Saving is best-effort in the UI; values still apply this session.
-    });
+    if (synced && persistReady) queueSave();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [synced, picks, overrides, photoTiles]);
+  }, [synced, persistReady, picks, overrides, photoTiles]);
 
   useEffect(() => {
     if (!synced) {
@@ -239,6 +287,7 @@ export default function DetailScreen({ listing, facebookConnected, onBack, onRec
 
   async function handleRecover() {
     setRecovering(true);
+    setPersistReady(false);
     setRecoverError(null);
     try {
       const stored = await recoverClone(listing.listing_id);
@@ -251,6 +300,9 @@ export default function DetailScreen({ listing, facebookConnected, onBack, onRec
     } catch (error) {
       setRecoverError(error instanceof Error ? error.message : "Clone check failed");
     } finally {
+      serverInitDone.current = true;
+      setCloneLoaded(true);
+      setPersistReady(true);
       setRecovering(false);
     }
   }
@@ -288,11 +340,15 @@ export default function DetailScreen({ listing, facebookConnected, onBack, onRec
   }
 
   function handlePick(field: PickableField, value: string) {
-    setPicks((current) => ({ ...current, [field]: value }));
+    const next = { ...stateRef.current.picks, [field]: value };
+    stateRef.current = { ...stateRef.current, picks: next };
+    setPicks(next);
   }
 
   function handleOverride(field: EditableField, value: string) {
-    setOverrides((current) => ({ ...current, [field]: value }));
+    const next = { ...stateRef.current.overrides, [field]: value };
+    stateRef.current = { ...stateRef.current, overrides: next };
+    setOverrides(next);
   }
 
   const hasRecovery = !synced || Boolean(clone?.recovery);
@@ -300,7 +356,13 @@ export default function DetailScreen({ listing, facebookConnected, onBack, onRec
     ? missingFields(displayListing).filter((field) => !picks[field])
     : [];
   const noPhotos = hasRecovery && activeTiles.length === 0;
-  const recreateBlocked = !hasRecovery || unanswered.length > 0 || noPhotos;
+  const unresolvedApproval = synced
+    ? unresolvedApprovalRows(effectiveListing(displayListing, picks, overrides, activeTiles), picks, overrides)
+    : [];
+  const videoUnavailable = Boolean(displayListing.videoCount > 0 && displayListing.videoState !== "recovered");
+  const unreadablePhotos = activeTiles.some((tile) => tile.src === null);
+  const saveReady = !synced || savingState === "saved";
+  const recreateBlocked = !hasRecovery || !cloneLoaded || unanswered.length > 0 || noPhotos || unreadablePhotos || unresolvedApproval.length > 0 || videoUnavailable || !saveReady || photoOrderUnsupported;
 
   return (
     <div className="screen">
@@ -347,6 +409,9 @@ export default function DetailScreen({ listing, facebookConnected, onBack, onRec
           photoTiles={activeTiles}
           photosEdited={photosEdited}
           onPhotoTilesChange={setPhotoTiles}
+          canEditPhotos={synced && Boolean(clone?.recovery)}
+          canAddReplacePhotos={false}
+          saveState={savingState}
         />
       )}
 
@@ -357,7 +422,29 @@ export default function DetailScreen({ listing, facebookConnected, onBack, onRec
         </p>
       ) : null}
       {noPhotos ? (
-        <p className="blocked-note">Add at least one photo to continue — a listing cannot be created without photos.</p>
+        <p className="blocked-note">
+          {synced
+            ? "The server archive has no selected readable photos. Run the clone check again; photo upload is not supported by this backend."
+            : "Add at least one photo to continue — a listing cannot be created without photos."}
+        </p>
+      ) : null}
+      {unreadablePhotos ? (
+        <p className="blocked-note">At least one archived photo is missing or unreadable. Retry the clone check before recreating; unreadable media cannot be approved.</p>
+      ) : null}
+      {photoOrderUnsupported ? (
+        <p role="alert" className="blocked-note">This backend saves your selected photo order, but its recreate job currently uploads those photos in archive order. Recreating is blocked until the backend job uses the saved order.</p>
+      ) : null}
+      {synced && savingState === "pending" ? (
+        <p role="status" className="blocked-note">Saving your picks and edits… Recreate is unavailable until the server confirms.</p>
+      ) : null}
+      {synced && savingState === "saved" ? (
+        <p role="status" className="screen-footnote">Your picks and edits were confirmed saved for this listing.</p>
+      ) : null}
+      {synced && savingState === "error" ? (
+        <p role="alert" className="alert-note">Could not save your clone check: {saveError}</p>
+      ) : null}
+      {synced && savingState === "error" ? (
+        <button type="button" className="edit-button" onClick={queueSave}>Retry save</button>
       ) : null}
       {jobError ? <p className="alert-note">⚠️ {jobError}</p> : null}
       <button

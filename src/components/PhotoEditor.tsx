@@ -9,9 +9,19 @@ import { readFileAsDataUrl, type PhotoTile } from "../lib/photos";
 interface Props {
   tiles: PhotoTile[];
   onChange: (tiles: PhotoTile[]) => void;
+  canAddReplace?: boolean;
 }
 
-export default function PhotoEditor({ tiles, onChange }: Props) {
+export default function PhotoEditor({ tiles, onChange, canAddReplace = true }: Props) {
+  function moveTile(tileId: string, delta: -1 | 1) {
+    const index = tiles.findIndex((tile) => tile.id === tileId);
+    const nextIndex = index + delta;
+    if (index < 0 || nextIndex < 0 || nextIndex >= tiles.length) return;
+    const next = [...tiles];
+    [next[index], next[nextIndex]] = [next[nextIndex], next[index]];
+    onChange(next);
+  }
+
   async function handleReplace(tileId: string, event: ChangeEvent<HTMLInputElement>) {
     const file = event.target.files?.[0];
     event.target.value = "";
@@ -63,15 +73,35 @@ export default function PhotoEditor({ tiles, onChange }: Props) {
               {tile.origin === "added" ? <span className="photo-tile-tag">New</span> : null}
             </span>
             <span className="photo-tile-actions">
-              <label className="photo-tile-button">
-                Replace
-                <input
-                  type="file"
-                  accept="image/*"
-                  hidden
-                  onChange={(event) => void handleReplace(tile.id, event)}
-                />
-              </label>
+              <button
+                type="button"
+                className="photo-tile-button"
+                aria-label={`Move ${tile.label} up`}
+                disabled={tiles[0]?.id === tile.id}
+                onClick={() => moveTile(tile.id, -1)}
+              >
+                Move up
+              </button>
+              <button
+                type="button"
+                className="photo-tile-button"
+                aria-label={`Move ${tile.label} down`}
+                disabled={tiles[tiles.length - 1]?.id === tile.id}
+                onClick={() => moveTile(tile.id, 1)}
+              >
+                Move down
+              </button>
+              {canAddReplace ? (
+                <label className="photo-tile-button">
+                  Replace
+                  <input
+                    type="file"
+                    accept="image/*"
+                    hidden
+                    onChange={(event) => void handleReplace(tile.id, event)}
+                  />
+                </label>
+              ) : null}
               <button type="button" className="photo-tile-button" onClick={() => handleRemove(tile.id)}>
                 Remove
               </button>
@@ -82,10 +112,12 @@ export default function PhotoEditor({ tiles, onChange }: Props) {
       {tiles.length === 0 ? (
         <span className="photo-empty">No photos — a listing needs at least one. Add a photo to continue.</span>
       ) : null}
-      <label className="check-chip photo-add-button">
-        + Add photo
-        <input type="file" accept="image/*" multiple hidden onChange={(event) => void handleAdd(event)} />
-      </label>
+      {canAddReplace ? (
+        <label className="check-chip photo-add-button">
+          + Add photo
+          <input type="file" accept="image/*" multiple hidden onChange={(event) => void handleAdd(event)} />
+        </label>
+      ) : null}
     </span>
   );
 }
