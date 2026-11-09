@@ -36,6 +36,12 @@ export interface PageLike {
   };
   evaluate(expression: string): Promise<unknown>;
   viewportSize(): { width: number; height: number } | null;
+  /**
+   * Sprint 3: attach files to a file input (photo/video upload in the
+   * create flow). Optional: the real Playwright page provides it; test
+   * fakes that never drive the create flow may omit it.
+   */
+  setInputFiles?(selector: string, files: string[]): Promise<void>;
 }
 
 export interface ContextLike {
@@ -283,6 +289,35 @@ export class BrowserManager {
     try {
       const result = await session.handle.page.evaluate(ADVANCE_WIZARD_SCRIPT);
       return result === true;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * Sprint 3: run a script in the user's current page (the create/delete
+   * flows are driven this way, in the same marker-script style as
+   * ADVANCE_WIZARD_SCRIPT). Returns null when the page rejects it.
+   */
+  async runScript(userId: string, script: string): Promise<unknown> {
+    const session = await this.ensureSession(userId);
+    try {
+      return await session.handle.page.evaluate(script);
+    } catch {
+      return null;
+    }
+  }
+
+  /** Sprint 3: attach files to a file input on the user's current page. */
+  async uploadFiles(userId: string, selector: string, files: string[]): Promise<boolean> {
+    const session = await this.ensureSession(userId);
+    const page = session.handle.page;
+    if (!page.setInputFiles) {
+      return false;
+    }
+    try {
+      await page.setInputFiles(selector, files);
+      return true;
     } catch {
       return false;
     }

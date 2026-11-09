@@ -38,6 +38,9 @@ beforeAll(async () => {
     corsOrigin: "http://localhost:5173",
     cookieSecure: false,
     browserIgnoreCertErrors: false,
+    dryRun: true,
+    jobPollIntervalMs: 15 * 60 * 1000,
+    jobStuckAfterMs: 48 * 60 * 60 * 1000,
   };
   parts = await buildApp({ config, launcher: async () => makeFakeHandle() });
 });

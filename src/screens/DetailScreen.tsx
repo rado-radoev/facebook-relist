@@ -2,6 +2,8 @@ import { useEffect, useRef, useState } from "react";
 import type { Listing, StoredClone } from "../types";
 import type { FieldPicks, PickableField } from "../lib/fieldOptions";
 import {
+  ApiError,
+  createJob,
   fetchArchivedPhotoUrl,
   fetchClone,
   recoverClone,
@@ -20,7 +22,9 @@ interface Props {
   listing: Listing;
   facebookConnected: boolean;
   onBack: () => void;
-  onRecreate: (listing: Listing) => void;
+  /** Sprint 3: synced listings start a real backend job — jobId is set.
+   *  Seed listings keep the timer preview (no jobId). */
+  onRecreate: (listing: Listing, jobId?: string) => void;
 }
 
 function storageKey(kind: "picks" | "edits", listingId: string): string {
@@ -144,6 +148,8 @@ export default function DetailScreen({ listing, facebookConnected, onBack, onRec
   const [cloneLoaded, setCloneLoaded] = useState(!synced);
   const [recovering, setRecovering] = useState(false);
   const [recoverError, setRecoverError] = useState<string | null>(null);
+  const [startingJob, setStartingJob] = useState(false);
+  const [jobError, setJobError] = useState<string | null>(null);
   const [serverTiles, setServerTiles] = useState<PhotoTile[] | null>(null);
   const serverInitDone = useRef(false);
 
@@ -249,6 +255,38 @@ export default function DetailScreen({ listing, facebookConnected, onBack, onRec
     }
   }
 
+  /**
+   * Start the recreate. For a synced listing this creates the real
+   * backend job from the saved clone check (the server re-checks
+   * completeness and the one-job-per-account lock); the progress screen
+   * then follows that job. If a job is already running for the account,
+   * open it instead of failing. Seed listings keep the timer preview.
+   */
+  async function handleRecreate() {
+    const effective = effectiveListing(displayListing, picks, overrides, activeTiles);
+    if (!synced) {
+      onRecreate(effective);
+      return;
+    }
+    setStartingJob(true);
+    setJobError(null);
+    try {
+      const job = await createJob(listing.listing_id);
+      onRecreate(effective, job.id);
+    } catch (error) {
+      if (error instanceof ApiError && error.status === 409) {
+        const activeJobId = error.details.jobId;
+        if (typeof activeJobId === "string") {
+          onRecreate(effective, activeJobId);
+          return;
+        }
+      }
+      setJobError(error instanceof Error ? error.message : "Could not start the recreate");
+    } finally {
+      setStartingJob(false);
+    }
+  }
+
   function handlePick(field: PickableField, value: string) {
     setPicks((current) => ({ ...current, [field]: value }));
   }
@@ -321,13 +359,14 @@ export default function DetailScreen({ listing, facebookConnected, onBack, onRec
       {noPhotos ? (
         <p className="blocked-note">Add at least one photo to continue — a listing cannot be created without photos.</p>
       ) : null}
+      {jobError ? <p className="alert-note">⚠️ {jobError}</p> : null}
       <button
         type="button"
         className="primary-button"
-        disabled={recreateBlocked}
-        onClick={() => onRecreate(effectiveListing(displayListing, picks, overrides, activeTiles))}
+        disabled={recreateBlocked || startingJob}
+        onClick={() => void handleRecreate()}
       >
-        Recreate listing
+        {startingJob ? "Starting recreate…" : "Recreate listing"}
       </button>
       <p className="screen-footnote">
         Recreating makes a brand-new copy first. The old listing stays up until the new one is live.

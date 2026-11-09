@@ -651,6 +651,20 @@ button {
   margin: 0;
 }
 
+/* Recreate job alert (Sprint 3): stuck / failed jobs surface their
+   alert or error in a red-tinted box — the old listing is never
+   deleted on these paths, and the box says so. */
+.alert-note {
+  color: var(--red);
+  background: color-mix(in srgb, var(--red) 10%, transparent);
+  border: 1px solid color-mix(in srgb, var(--red) 45%, transparent);
+  border-radius: 12px;
+  padding: 10px 12px;
+  font-size: 14px;
+  line-height: 1.45;
+  margin: 0;
+}
+
 .primary-button:disabled {
   opacity: 0.45;
   cursor: not-allowed;

@@ -129,5 +129,59 @@ export type TabId = "listings" | "history";
 export type View =
   | { kind: "tabs" }
   | { kind: "detail"; listing: Listing }
-  | { kind: "progress"; listing: Listing }
+  | { kind: "progress"; listing: Listing; jobId?: string }
   | { kind: "connect" };
+
+// ---------------------------------------------------------------------------
+// Sprint 3 backend DTOs (mirror server/src/jobTypes.ts)
+
+export type JobStatus =
+  | "queued"
+  | "creating"
+  | "in_review"
+  | "available"
+  | "deleting"
+  | "done"
+  | "stuck"
+  | "failed";
+
+export interface JobAuditEvent {
+  at: string;
+  action: string;
+  detail: string;
+}
+
+export interface RecreateJob {
+  id: string;
+  listingId: string;
+  listingTitle: string;
+  oldListingUrl: string;
+  status: JobStatus;
+  dryRun: boolean;
+  suppliedFields: string[];
+  newListingId: string | null;
+  newListingUrl: string | null;
+  createdAt: string;
+  updatedAt: string;
+  inReviewSince: string | null;
+  nextPollAt: string | null;
+  lastPolledAt: string | null;
+  pollCount: number;
+  availableAt: string | null;
+  completedAt: string | null;
+  error: string | null;
+  alert: string | null;
+  audit: JobAuditEvent[];
+}
+
+export interface JobHistoryEntry {
+  id: string;
+  jobId: string;
+  title: string;
+  oldListingId: string;
+  oldListingUrl: string;
+  newListingId: string;
+  newListingUrl: string;
+  completedAt: string;
+  suppliedFields: string[];
+}
