@@ -157,6 +157,163 @@ button {
   opacity: 0.6;
 }
 
+/* Account switcher */
+.account-row {
+  display: flex;
+  gap: 8px;
+  overflow-x: auto;
+  padding-bottom: 2px;
+  scrollbar-width: none;
+}
+
+.account-row::-webkit-scrollbar {
+  display: none;
+}
+
+.account-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  white-space: nowrap;
+  background: var(--surface-soft);
+  border: 1px solid var(--surface);
+  border-radius: 999px;
+  padding: 6px 12px 6px 6px;
+  font-size: 13.5px;
+  color: var(--subtext);
+  cursor: pointer;
+}
+
+.account-chip-avatar {
+  width: 26px;
+  height: 26px;
+  border-radius: 50%;
+  background: var(--accent);
+  color: var(--base);
+  font-size: 11px;
+  font-weight: 700;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+.account-chip-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.account-chip-active {
+  border-color: var(--accent);
+  color: var(--text);
+  font-weight: 600;
+}
+
+.account-chip-add {
+  padding: 6px 13px;
+  border-style: dashed;
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.connection-avatar-muted {
+  background: var(--surface);
+  color: var(--subtext);
+  border: 1px solid var(--overlay);
+}
+
+.connect-button {
+  background: var(--accent);
+  border: none;
+  border-radius: 999px;
+  padding: 7px 13px;
+  font-size: 12.5px;
+  font-weight: 700;
+  color: var(--base);
+  cursor: pointer;
+  flex-shrink: 0;
+}
+
+/* Connect flow */
+.connect-steps {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.connect-step {
+  display: flex;
+  align-items: center;
+  gap: 11px;
+  padding: 9px 0;
+  border-top: 1px solid var(--surface);
+  font-size: 14px;
+  line-height: 1.45;
+}
+
+.connect-step:first-child {
+  border-top: none;
+  padding-top: 2px;
+}
+
+.connect-step-number {
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  background: var(--accent);
+  color: var(--base);
+  font-size: 12.5px;
+  font-weight: 700;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+.empty-account {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+/* Household accounts (Settings) */
+.account-list {
+  list-style: none;
+  margin: 0 0 10px;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.account-list-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 0;
+  border-top: 1px solid var(--surface);
+}
+
+.account-list-row:first-child {
+  border-top: none;
+  padding-top: 0;
+}
+
+.account-list-name {
+  flex: 1;
+  min-width: 0;
+  font-size: 14.5px;
+  font-weight: 600;
+}
+
+.account-list-status {
+  font-size: 12.5px;
+  font-weight: 600;
+}
+
 /* Filter chips */
 .chip-row {
   display: flex;

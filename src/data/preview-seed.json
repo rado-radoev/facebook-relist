@@ -1,6 +1,7 @@
 [
   {
     "listing_id": "2173406210055821",
+    "accountId": "radoslav-radoev",
     "title": "Nintendo Switch Hot Wheels Unleashed 2 Turbocharged",
     "price": "$30",
     "condition": "Used - Like New",
@@ -13,16 +14,17 @@
     "photoCount": 3,
     "videoCount": 0,
     "category": "Toys & Games",
-    "conditionFlag": "Condition missing in Facebook edit form \u2014 flagged, not guessed",
+    "conditionFlag": "Condition missing in Facebook edit form — flagged, not guessed",
     "delivery": "Not readable for this listing (edit form blocked)",
     "locationLabel": "San Diego, CA"
   },
   {
     "listing_id": "1165934432236072",
+    "accountId": "radoslav-radoev",
     "title": "EVGA GTX 1070 SC BLACK EDITION 8GB",
     "price": "$110",
     "condition": "Used - Like New",
-    "description": "Great GPU for low cost. You can still play casual games with decent frame rate. \nI have had this card for long time and has never had any issues. \nIt was never overcooked nor I have mined any crypto with it. \nI have only ised it for casual gaming. \nIt has spent most of its time in my Workstation as a regular GPU just running desktop apps. \n\nWorks great doesn\u2019t overheat!\n\nYou won\u2019t regret it.",
+    "description": "Great GPU for low cost. You can still play casual games with decent frame rate. \nI have had this card for long time and has never had any issues. \nIt was never overcooked nor I have mined any crypto with it. \nI have only ised it for casual gaming. \nIt has spent most of its time in my Workstation as a regular GPU just running desktop apps. \n\nWorks great doesn’t overheat!\n\nYou won’t regret it.",
     "location": "San Diego, CA",
     "status": "Sold",
     "creation_date": "2026-04-15T11:30:49-07:00",
@@ -36,6 +38,7 @@
   },
   {
     "listing_id": "959132059802063",
+    "accountId": "radoslav-radoev",
     "title": "Pirate Ship toy",
     "price": "$25",
     "condition": "Used - Good",
@@ -53,6 +56,7 @@
   },
   {
     "listing_id": "1720718666003548",
+    "accountId": "radoslav-radoev",
     "title": "Paw Patrol Marshall fire truck Chase Cop Cruiser Air Patroller Robo dog",
     "price": "$25",
     "condition": "Used - Good",
@@ -70,6 +74,7 @@
   },
   {
     "listing_id": "1452483746465654",
+    "accountId": "radoslav-radoev",
     "title": "Mechanical Keyboard Linear Viridian Keyboard Switches Illuminated ,5 Pin Pre-lubed\nKEYS ONLY",
     "price": "$30",
     "condition": "Used - Like New",
@@ -99,6 +104,7 @@
   },
   {
     "listing_id": "1888002825419159",
+    "accountId": "radoslav-radoev",
     "title": "Flood light with motion sensor",
     "price": "$30",
     "condition": "Used - Good",

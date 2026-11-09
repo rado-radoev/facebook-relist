@@ -4,8 +4,18 @@ export interface MeetupPrefs {
   doorDropoff: boolean;
 }
 
+export type SessionStatus = "connected" | "expired" | "none";
+
+export interface Account {
+  id: string;
+  displayName: string;
+  initials: string;
+  sessionStatus: SessionStatus;
+}
+
 export interface Listing {
   listing_id: string;
+  accountId: string;
   title: string;
   price: string;
   condition: string;
@@ -31,4 +41,5 @@ export type TabId = "listings" | "history" | "settings";
 export type View =
   | { kind: "tabs" }
   | { kind: "detail"; listing: Listing }
-  | { kind: "progress"; listing: Listing };
+  | { kind: "progress"; listing: Listing }
+  | { kind: "connect" };
