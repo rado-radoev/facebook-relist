@@ -54,16 +54,9 @@ interface UserOperationBrowser {
   withUserOperation?<T>(userId: string, operation: () => Promise<T>): Promise<T>;
 }
 
-interface ListingSyncStore {
-  setListingsSync?(userId: string, listings: SyncedListing[], syncedAt: string): Promise<void>;
-}
-
 function withUserOperation<T>(browser: BrowserManager, userId: string, operation: () => Promise<T>): Promise<T> {
-  const coordinated = (browser as BrowserManager & UserOperationBrowser).withUserOperation;
-  // The base branch does not yet contain the security-owned coordinator. This
-  // structural optional dependency is consumed automatically at integration.
-  if (!coordinated) return operation();
-  return (coordinated.bind(browser) as (id: string, task: () => Promise<T>) => Promise<T>)(userId, operation);
+  const coordinator = (browser as unknown as UserOperationBrowser).withUserOperation;
+  return coordinator ? coordinator.bind(browser)(userId, operation) : operation();
 }
 
 function isExpectedPage(snapshot: PageSnapshot, kind: "selling_list" | "edit_form" | "listing", listingId?: string): boolean {
@@ -107,7 +100,7 @@ export class ScrapeService {
 
   /** Read the person's own selling list and replace their synced copy. */
   async syncListings(userId: string): Promise<SyncedListing[]> {
-    return this.browser.withUserOperation(userId, () => this.syncListingsUnsafe(userId));
+    return withUserOperation(this.browser, userId, () => this.syncListingsUnsafe(userId));
   }
 
   private async syncListingsUnsafe(userId: string): Promise<SyncedListing[]> {
@@ -135,7 +128,7 @@ export class ScrapeService {
    * files (and the video, attempted) downloaded into the archive.
    */
   async recoverListing(userId: string, listingId: string): Promise<StoredClone> {
-    return this.browser.withUserOperation(userId, () => this.recoverListingUnsafe(userId, listingId));
+    return withUserOperation(this.browser, userId, () => this.recoverListingUnsafe(userId, listingId));
   }
 
   private async recoverListingUnsafe(userId: string, listingId: string): Promise<StoredClone> {
