@@ -87,7 +87,11 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
 
   return {
     port: Number(env.PORT ?? 8787),
-    host: env.HOST ?? "0.0.0.0",
+    // Dual-stack bind by default: "::" answers on both IPv6 (::1) and
+    // IPv4 (127.0.0.1). Some browsers resolve "localhost" to ::1 first,
+    // so an IPv4-only bind makes the backend unreachable depending on
+    // which loopback spelling the browser picks. HOST overrides.
+    host: env.HOST ?? "::",
     dataDir,
     corsOrigin: env.CORS_ORIGIN ?? "http://localhost:5173",
     cookieSecure: env.COOKIE_SECURE === "1",

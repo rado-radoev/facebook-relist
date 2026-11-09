@@ -276,6 +276,19 @@ npm install
 npm run dev                       # http://localhost:5173
 ```
 
+Both loopback spellings work: open the app at `http://localhost:5173`
+**or** `http://127.0.0.1:5173` (or `http://[::1]:5173`). The backend
+binds dual-stack (IPv4 + IPv6) by default, the frontend talks to the
+backend on the same host name the page was served from, and the
+backend accepts any loopback origin — so it no longer matters which
+spelling your browser resolves `localhost` to.
+
+**If sign-in says "Could not reach the Relist backend":** the backend
+(terminal 1) is not running or not reachable. Check
+<http://localhost:8787/api/health> in the browser — it should answer
+`{"ok":true}`. If it doesn't load, (re)start terminal 1 and leave it
+running; the frontend alone cannot sign anyone in.
+
 Backend config is via env (see `server/.env.example`): `PORT`, `HOST`,
 `DATA_DIR` (accounts + browser profiles; default `server/data/`),
 `CORS_ORIGIN`, `COOKIE_SECURE`, and two sandbox-only options

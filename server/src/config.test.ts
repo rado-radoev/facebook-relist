@@ -1,5 +1,16 @@
 import { describe, expect, it } from "vitest";
-import { parseProxyEnv } from "./config.js";
+import { loadConfig, parseProxyEnv } from "./config.js";
+
+describe("loadConfig host default", () => {
+  it("binds dual-stack by default so both loopback spellings answer", () => {
+    expect(loadConfig({}).host).toBe("::");
+  });
+
+  it("keeps the HOST env override", () => {
+    expect(loadConfig({ HOST: "127.0.0.1" }).host).toBe("127.0.0.1");
+    expect(loadConfig({ HOST: "0.0.0.0" }).host).toBe("0.0.0.0");
+  });
+});
 
 describe("parseProxyEnv", () => {
   it("parses a full proxy URL", () => {
