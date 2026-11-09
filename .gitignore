@@ -1,0 +1,11 @@
+node_modules
+dist
+.DS_Store
+*.local
+.env
+# Relist backend runtime data: accounts, sessions, per-user browser
+# profiles (contains live Facebook session cookies — never commit).
+data/
+server/data/
+server/data-e2e/
+server/scripts/*.jpg
