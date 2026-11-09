@@ -6,15 +6,17 @@ title, price, description, stored category, condition, location, delivery),
 creates a brand-new copy, waits for Facebook's review, and only then deletes
 the old listing.
 
-> **This branch (`build/sprint-2`) is Sprint 2: listings sync + full
-> clone recovery.** The backend now reads the signed-in person's own
-> selling list and recovers the full clone (all photos downloaded to the
-> backend archive, every field, in the verified recovery order) through
-> their own browser session. **Live verification against real Facebook is
-> still pending** — no backend profile has a real Facebook login yet, so
-> the scraping layer is verified against fixture snapshots of the two
-> spike listings, not against Facebook itself (see "Sprint 2" below).
-> The recreate job is Sprint 3; the real-iPhone check is Sprint 4.
+> **This branch (`build/sprint-3`) is Sprint 3: the recreate job
+> (create → watch → delete), built safeguard-first.** The job walks the
+> §3 order as a persistent state machine and deletes the old listing
+> only after the new one is confirmed live. **Dry-run is the default**
+> (`RELIST_DRY_RUN`): a dry-run job walks every step but stops before
+> posting and before deleting, so it cannot change anything on
+> Facebook. **Live verification against real Facebook is still
+> pending** — no backend profile has a real Facebook login yet, so the
+> job is verified against a fake driver and fixture snapshots, not
+> against Facebook itself (see "Sprint 3" below). The real-iPhone,
+> owner-present first real recreate is Sprint 4.
 
 ## Sprint 1 — backend foundation
 
@@ -81,11 +83,10 @@ frames: `server/scripts/e2e-frame-*.jpg`, regenerable any time with
 
 Not built yet:
 
-- **Sprint 3:** the recreate job (create → poll review → delete old only
-  once the new one is Available → verify) + real history.
 - **Sprint 4:** install on the real iPhone and run one real recreate
   end-to-end. Known Sprint 4 item: the remote view's typing box is
   desktop-verified; the iOS keyboard behaviour gets checked there.
+  (The Sprint 3 recreate job is built — see "Sprint 3" below.)
 
 ## Sprint 2 — listings sync + full clone recovery
 
@@ -159,6 +160,107 @@ How it is verified — and what is NOT verified yet:
   degrades honestly if a surface differs: an unreadable edit form falls
   back to the listing page, and anything still unreadable is reported
   missing with a reason — never guessed.
+
+## Sprint 3 — the recreate job (create → watch → delete)
+
+The highest-stakes part of Relist: the first code that writes to
+Facebook. It is built safeguard-first — the safeguards below are the
+deliverable, enforced in the backend (`server/src/jobService.ts`),
+never just in the UI.
+
+**The flow (requirements §3, in order, no shortcuts):**
+
+1. **Job creation** — `POST /api/listings/:id/jobs` builds the job from
+   the stored clone check: recovered values + the person's picks/edits
+   (`server/src/jobLogic.ts` resolves them). The server refuses (400,
+   with the field names) while **any** field is still missing/unpicked,
+   refuses (404) listings that aren't the caller's own synced ones, and
+   refuses (409) while another job is active for the account — **one
+   job per user at a time**.
+2. **Create** — inside the owning user's own browser session, the
+   driver walks Facebook's Marketplace create flow with human pacing:
+   upload the archived photos (original order, plus the video when it
+   was recovered), fill title/price/description, pick
+   category/condition/attributes, then Step 2 (location, delivery type,
+   meetup preferences) and submit. The new listing's id/link is
+   recorded from the result.
+3. **Watch** — the job polls the new listing about every 15 minutes
+   (`RELIST_POLL_INTERVAL_MS`, jittered) until it is Available. Review
+   stuck past 48 hours (`RELIST_STUCK_AFTER_MS`) → the job goes
+   **stuck**, an alert is surfaced in the app, and the old listing is
+   **not** deleted.
+4. **Delete** — only after the new listing is confirmed Available, and
+   only after the delete step **re-verifies fresh, at delete time**:
+   the new listing must be Available *now* (the cached state is never
+   trusted), its id must differ from the old listing's id, and the old
+   listing must still be the person's own listed item. Then the old
+   listing is deleted.
+5. **Verify + history** — the job re-reads the selling list (new one
+   present, old one gone) before calling itself done, and records a
+   history entry (old link, new link, date, and which fields the
+   person supplied or edited). The Progress screen follows the real
+   job state from the API (`GET /api/jobs/:id`, polled); History shows
+   the backend's completed jobs (`GET /api/history`).
+
+**Idempotency & crash safety:**
+
+- The job is a **persistent state machine** —
+  `queued → creating → in_review → available → deleting → done`,
+  with `stuck` / `failed` as safe terminal states — stored in the
+  backend store and saved **before** each browser action. A server
+  restart resumes every active job from its persisted state (the
+  runner sweeps on startup and every 30s); every step is safe to
+  re-enter.
+- **Duplicate guard:** before *every* create attempt — including a
+  retry after a crash mid-create — the person's selling list is
+  checked for a copy the job may already have posted (title + price +
+  first-photo fingerprint; best-effort, see `jobLogic.ts`). A found
+  copy is **adopted** as the job's new listing, never duplicated.
+- **Per-user job lock** (above) plus an in-process guard so the
+  route's background kick and the runner sweep can never drive the
+  same job concurrently; the store's atomic writes use per-save tmp
+  files for the same reason (a race the Sprint 3 tests caught).
+- **Audit log:** every job carries a timestamped audit trail
+  (creation, each poll, guard decisions, delete, verification),
+  visible in the job API and the Progress screen's data.
+
+**Dry-run — the default, and what it means:**
+
+- `RELIST_DRY_RUN` unset (or anything but `0`) = **dry-run ON**. A
+  job created in dry-run mode is marked `dryRun` permanently.
+- A dry-run job walks **every** step against the browser — the create
+  form is filled, the delete flow is opened — but stops **before the
+  create submit** and **before the delete confirm**, records what it
+  *would* have done in the audit log, simulates the watch/verify
+  steps (there is no real new listing to poll), and records **no
+  history entry**. It can never change anything on Facebook.
+- Real writes require `RELIST_DRY_RUN=0` explicitly, at server level —
+  there is no per-request or per-job way to escalate a dry-run job.
+- Prove it any time with the fake-driver smoke check:
+  `cd server && npx tsx scripts/dry-run-smoke.ts` (6 checks: job is
+  dry-run by default, walks to done, the driver only ever receives
+  dry-run calls, no history recorded).
+
+**How it is verified — and what is NOT verified yet:**
+
+- **99 Vitest tests** (59 from Sprints 1–2, all still passing): the
+  pure resolution/fingerprint/availability logic (18), the state
+  machine against a fake driver with a fake clock (15) — full happy
+  path, stuck-after-48h with the old listing never deleted,
+  delete-guard refusals (fresh check back in review, new id == old
+  id, dry-run), duplicate adoption, resume-after-restart from both
+  `in_review` and mid-`creating`, per-user lock and isolation — and
+  the API surface (7) including 400-with-missing-fields, 409 lock,
+  and cross-user 404s.
+- **Live create/delete is UNVERIFIED.** Every write-path script in
+  `server/src/facebookDriver.ts` (create-form filling, photo upload,
+  category/condition pickers, the delete flow, availability reading)
+  is written from the verified spike observations but has **never run
+  against real Facebook** — no backend profile holds a real login
+  yet. The first live run is Sprint 4: the owner present, her
+  listing, her confirmation, dry-run first, then one real recreate
+  watched end to end. Until then, no claim is made that a real
+  create or delete works.
 
 ### Run the backend + frontend locally
 

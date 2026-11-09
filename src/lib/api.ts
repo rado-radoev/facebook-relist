@@ -5,6 +5,8 @@
 import type {
   CloneEdits,
   ClonePicks,
+  JobHistoryEntry,
+  RecreateJob,
   SessionStatus,
   StoredClone,
   SyncedListing,
@@ -20,10 +22,15 @@ export interface ApiUser {
 
 export class ApiError extends Error {
   status: number;
+  /** The parsed error body, for structured fields (e.g. a job creation
+   *  conflict carries the active job's id; an incomplete clone carries
+   *  the missing field names). */
+  details: Record<string, unknown>;
 
-  constructor(status: number, message: string) {
+  constructor(status: number, message: string, details: Record<string, unknown> = {}) {
     super(message);
     this.status = status;
+    this.details = details;
   }
 }
 
@@ -36,7 +43,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const body = (await response.json().catch(() => ({}))) as Record<string, unknown>;
   if (!response.ok) {
     const message = typeof body.error === "string" ? body.error : `Request failed (${response.status})`;
-    throw new ApiError(response.status, message);
+    throw new ApiError(response.status, message, body);
   }
   return body as T;
 }
@@ -135,6 +142,34 @@ export async function saveClonePicks(
     body: JSON.stringify(input),
   });
   return data.clone;
+}
+
+// ---------------------------------------------------------------------------
+// Sprint 3: recreate jobs + history
+
+/** Start a recreate job for one of the person's own synced listings.
+ *  The backend refuses (400) while any clone field is still missing,
+ *  and (409) while another job is active for the account. */
+export async function createJob(listingId: string): Promise<RecreateJob> {
+  const data = await request<{ job: RecreateJob }>(`/api/listings/${listingId}/jobs`, {
+    method: "POST",
+  });
+  return data.job;
+}
+
+export async function fetchJobs(): Promise<RecreateJob[]> {
+  const data = await request<{ jobs: RecreateJob[] }>("/api/jobs");
+  return data.jobs;
+}
+
+export async function fetchJob(jobId: string): Promise<RecreateJob> {
+  const data = await request<{ job: RecreateJob }>(`/api/jobs/${jobId}`);
+  return data.job;
+}
+
+export async function fetchJobHistory(): Promise<JobHistoryEntry[]> {
+  const data = await request<{ history: JobHistoryEntry[] }>("/api/history");
+  return data.history;
 }
 
 /**

@@ -18,6 +18,11 @@ import type {
   StoredClone,
   SyncedListing,
 } from "./cloneTypes.js";
+import {
+  isTerminalJobStatus,
+  type JobHistoryEntry,
+  type RecreateJob,
+} from "./jobTypes.js";
 import type { FacebookStatus } from "./facebookStatus.js";
 import { SESSION_TTL_MS } from "./config.js";
 
@@ -47,10 +52,16 @@ interface StoreData {
   listings: Record<string, SyncedListing[]>;
   /** Sprint 2: clone recoveries + saved picks/edits, per user per listing. */
   clones: Record<string, Record<string, StoredClone>>;
+  /** Sprint 3: recreate jobs, per user. The job record IS the state
+   *  machine's durable state — it is saved after every transition, so a
+   *  server restart resumes each job from its stored status. */
+  jobs: Record<string, RecreateJob[]>;
+  /** Sprint 3: completed recreates, per user, newest last. */
+  history: Record<string, JobHistoryEntry[]>;
 }
 
 function emptyData(): StoreData {
-  return { users: [], sessions: [], listings: {}, clones: {} };
+  return { users: [], sessions: [], listings: {}, clones: {}, jobs: {}, history: {} };
 }
 
 export function hashToken(token: string): string {
@@ -84,7 +95,12 @@ export class Store {
   }
 
   private async save(): Promise<void> {
-    const tmpPath = `${this.filePath}.tmp`;
+    // A unique tmp path per save: concurrent writers (e.g. the Sprint 3
+    // job runner alongside a request) must never rename each other's
+    // tmp file out from under them. Each rename is still atomic, and
+    // every save serializes the same in-memory state, so the last
+    // rename wins with a complete document.
+    const tmpPath = `${this.filePath}.tmp-${randomUUID()}`;
     await writeFile(tmpPath, JSON.stringify(this.data, null, 2), "utf8");
     await rename(tmpPath, this.filePath);
   }
@@ -220,5 +236,74 @@ export class Store {
     this.data.clones[userId] = perUser;
     await this.save();
     return record;
+  }
+
+  // -- Sprint 3: recreate jobs + history (all per-user) ------------------
+
+  async createJob(job: RecreateJob): Promise<RecreateJob> {
+    this.ensureLoaded();
+    const perUser = this.data.jobs[job.userId] ?? [];
+    perUser.push(job);
+    this.data.jobs[job.userId] = perUser;
+    await this.save();
+    return job;
+  }
+
+  getJob(userId: string, jobId: string): RecreateJob | undefined {
+    this.ensureLoaded();
+    return (this.data.jobs[userId] ?? []).find((job) => job.id === jobId);
+  }
+
+  listJobs(userId: string): RecreateJob[] {
+    this.ensureLoaded();
+    return [...(this.data.jobs[userId] ?? [])];
+  }
+
+  /** Every user's non-terminal jobs — the runner's resume sweep after a
+   *  restart. Callers only ever act through each job's own userId. */
+  listAllActiveJobs(): RecreateJob[] {
+    this.ensureLoaded();
+    const active: RecreateJob[] = [];
+    for (const jobs of Object.values(this.data.jobs)) {
+      for (const job of jobs) {
+        if (!isTerminalJobStatus(job.status)) {
+          active.push(job);
+        }
+      }
+    }
+    return active;
+  }
+
+  /** The user's one active (non-terminal) job, if any — the per-user
+   *  job lock is "an active job exists", checked before creating one. */
+  findActiveJob(userId: string): RecreateJob | undefined {
+    this.ensureLoaded();
+    return (this.data.jobs[userId] ?? []).find((job) => !isTerminalJobStatus(job.status));
+  }
+
+  async updateJob(job: RecreateJob): Promise<void> {
+    this.ensureLoaded();
+    const perUser = this.data.jobs[job.userId] ?? [];
+    const index = perUser.findIndex((entry) => entry.id === job.id);
+    if (index === -1) {
+      perUser.push(job);
+    } else {
+      perUser[index] = job;
+    }
+    this.data.jobs[job.userId] = perUser;
+    await this.save();
+  }
+
+  async addHistory(userId: string, entry: JobHistoryEntry): Promise<void> {
+    this.ensureLoaded();
+    const perUser = this.data.history[userId] ?? [];
+    perUser.push(entry);
+    this.data.history[userId] = perUser;
+    await this.save();
+  }
+
+  listHistory(userId: string): JobHistoryEntry[] {
+    this.ensureLoaded();
+    return [...(this.data.history[userId] ?? [])];
   }
 }

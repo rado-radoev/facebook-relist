@@ -50,6 +50,31 @@ export interface Config {
    * there the browser must verify Facebook's real certificates.
    */
   browserIgnoreCertErrors: boolean;
+  /**
+   * Sprint 3 safety switch: dry-run jobs. DEFAULT ON — a dry-run job
+   * walks every step against the browser but stops before the create
+   * submit and before the delete confirm, so it can never change
+   * anything on Facebook. Real writes happen only when RELIST_DRY_RUN
+   * is explicitly set to "0".
+   */
+  dryRun: boolean;
+  /** Sprint 3: how often the recreate job polls a new listing that is
+   *  in review (requirements §3: about every 15 minutes). */
+  jobPollIntervalMs: number;
+  /** Sprint 3: review is "stuck" after this long (requirements §3: 48h)
+   *  — the job stops and alerts; the old listing is NOT deleted. */
+  jobStuckAfterMs: number;
+}
+
+function parsePositiveMs(raw: string | undefined, fallback: number): number {
+  if (!raw) {
+    return fallback;
+  }
+  const value = Number(raw);
+  if (!Number.isFinite(value) || value <= 0) {
+    return fallback;
+  }
+  return Math.floor(value);
 }
 
 const serverDir = path.dirname(fileURLToPath(import.meta.url));
@@ -68,6 +93,9 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     cookieSecure: env.COOKIE_SECURE === "1",
     browserProxy: parseProxyEnv(env.BROWSER_PROXY ?? env.HTTPS_PROXY ?? env.https_proxy),
     browserIgnoreCertErrors: env.BROWSER_IGNORE_CERT_ERRORS === "1",
+    dryRun: env.RELIST_DRY_RUN !== "0",
+    jobPollIntervalMs: parsePositiveMs(env.RELIST_POLL_INTERVAL_MS, 15 * 60 * 1000),
+    jobStuckAfterMs: parsePositiveMs(env.RELIST_STUCK_AFTER_MS, 48 * 60 * 60 * 1000),
   };
 }
 

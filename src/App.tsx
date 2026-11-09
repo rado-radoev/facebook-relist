@@ -74,8 +74,8 @@ export default function App() {
     setView({ kind: "detail", listing });
   }
 
-  function startRecreate(listing: Listing) {
-    setView({ kind: "progress", listing });
+  function startRecreate(listing: Listing, jobId?: string) {
+    setView({ kind: "progress", listing, jobId });
   }
 
   function backToTabs(nextTab: TabId) {
@@ -144,7 +144,13 @@ export default function App() {
     );
   }
   if (view.kind === "progress") {
-    body = <ProgressScreen listing={view.listing} onDone={() => backToTabs("history")} />;
+    body = (
+      <ProgressScreen
+        listing={view.listing}
+        jobId={view.jobId}
+        onDone={() => backToTabs("history")}
+      />
+    );
   }
   if (view.kind === "connect") {
     body = (
@@ -168,7 +174,7 @@ export default function App() {
           🔁
         </span>
         <span className="app-name">Relist</span>
-        <span className="preview-badge">Sprint 2</span>
+        <span className="preview-badge">Sprint 3</span>
       </header>
 
       <main className="app-main">{body}</main>
