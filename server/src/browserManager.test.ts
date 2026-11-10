@@ -5,7 +5,10 @@ import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
   BrowserManager,
+  FACEBOOK_LOGIN_URL,
+  disableChromiumPasswordManager,
   type BrowserHandle,
+  type CdpSessionLike,
   type ContextLike,
   type PageLike,
 } from "./browserManager.js";
@@ -315,5 +318,155 @@ describe("BrowserManager", () => {
     const user = await store.createUser({ name: "A", email: "a@example.com", passwordHash: "x" });
     const manager = makeManager();
     await expect(manager.sendInput(user.id, { type: "key", key: "Enter" })).resolves.toBe(false);
+  });
+});
+
+// ---------------------------------------------------------- login page
+
+class FakeManagerCdp implements CdpSessionLike {
+  readonly sends: Array<{ method: string; params?: Record<string, unknown> }> = [];
+
+  async send(method: string, params?: Record<string, unknown>): Promise<unknown> {
+    this.sends.push({ method, params });
+    return {};
+  }
+
+  on(): void {
+    // No screencast in these fakes.
+  }
+}
+
+function makeLoginCapableHandle() {
+  const autoCdp = new FakeManagerCdp();
+  const loginCdp = new FakeManagerCdp();
+  const autoGotos: string[] = [];
+  const loginGotos: string[] = [];
+  const snapshot = {
+    url: "https://www.facebook.com/marketplace/you/selling",
+    text: "",
+    images: [] as string[],
+    videos: [] as string[],
+  };
+  const autoPage: PageLike = {
+    url: () => "https://www.facebook.com/",
+    goto: async (url: string) => {
+      autoGotos.push(url);
+    },
+    screenshot: async () => Buffer.from("fake-jpeg-bytes"),
+    mouse: { click: async () => undefined, wheel: async () => undefined },
+    keyboard: { type: async () => undefined, press: async () => undefined },
+    evaluate: async () => snapshot,
+    viewportSize: () => ({ width: 1280, height: 800 }),
+    setInputFiles: async () => undefined,
+    cdp: async () => autoCdp,
+  };
+  const loginPage: PageLike = {
+    url: () => "https://www.facebook.com/login",
+    goto: async (url: string) => {
+      loginGotos.push(url);
+    },
+    screenshot: async () => Buffer.from("fake-jpeg-bytes"),
+    mouse: { click: async () => undefined, wheel: async () => undefined },
+    keyboard: { type: async () => undefined, press: async () => undefined },
+    evaluate: async () => snapshot,
+    viewportSize: () => ({ width: 390, height: 844 }),
+    close: async () => undefined,
+    cdp: async () => loginCdp,
+  };
+  const context: ContextLike = {
+    cookies: async () => [],
+    clearCookies: async () => undefined,
+    close: async () => undefined,
+    pages: () => [autoPage],
+    newPage: async () => loginPage,
+  };
+  const handle: BrowserHandle = { context, page: autoPage };
+  return { handle, autoCdp, loginCdp, autoGotos, loginGotos, autoPage, loginPage };
+}
+
+describe("BrowserManager login page", () => {
+  it("openLoginPage applies emulation to the dedicated new page only", async () => {
+    const user = await store.createUser({ name: "A", email: "login-page@example.com", passwordHash: "x" });
+    const fake = makeLoginCapableHandle();
+    const manager = new BrowserManager(store, dataDir, async () => fake.handle);
+
+    const page = await manager.openLoginPage(user.id);
+    expect(page).toBe(fake.loginPage);
+    expect(manager.loginInProgress(user.id)).toBe(true);
+    expect(manager.getLoginPage(user.id)).toBe(fake.loginPage);
+    expect(fake.loginGotos).toEqual([FACEBOOK_LOGIN_URL]);
+    // The automation page was neither navigated nor emulated.
+    expect(fake.autoGotos).toEqual([]);
+    expect(fake.autoCdp.sends).toEqual([]);
+    expect(fake.loginCdp.sends).toEqual([
+      {
+        method: "Emulation.setDeviceMetricsOverride",
+        params: {
+          width: 390, height: 844, deviceScaleFactor: 2, mobile: false,
+          screenWidth: 390, screenHeight: 844,
+        },
+      },
+      {
+        method: "Emulation.setTouchEmulationEnabled",
+        params: { enabled: true, maxTouchPoints: 5 },
+      },
+    ]);
+    // Reopening reuses the same login page instead of stacking pages.
+    await expect(manager.openLoginPage(user.id)).resolves.toBe(fake.loginPage);
+    expect(fake.loginGotos).toEqual([FACEBOOK_LOGIN_URL]);
+    await manager.closeAll();
+  });
+
+  it("blocks automation while a login page is open and unblocks after it closes", async () => {
+    const user = await store.createUser({ name: "A", email: "login-guard@example.com", passwordHash: "x" });
+    const fake = makeLoginCapableHandle();
+    const manager = new BrowserManager(store, dataDir, async () => fake.handle);
+    await manager.ensureSession(user.id);
+
+    await manager.openLoginPage(user.id);
+    expect(await manager.collectSnapshotAt(user.id, "https://www.facebook.com/marketplace/you/selling"))
+      .toBeNull();
+    expect(await manager.runScript(user.id, "/* anything */")).toBeNull();
+    expect(await manager.uploadFiles(user.id, 'input[type="file"]', [])).toBe(false);
+    expect(await manager.advanceWizard(user.id)).toBe(false);
+    // The read-only current-page snapshot stays unguarded.
+    expect(await manager.collectCurrentSnapshot(user.id)).not.toBeNull();
+
+    await manager.closeLoginPage(user.id);
+    expect(manager.loginInProgress(user.id)).toBe(false);
+    expect(await manager.collectSnapshotAt(user.id, "https://www.facebook.com/marketplace/you/selling"))
+      .not.toBeNull();
+    expect(await manager.runScript(user.id, "/* anything */")).not.toBeNull();
+    expect(await manager.uploadFiles(user.id, 'input[type="file"]', [])).toBe(true);
+    await manager.closeAll();
+  });
+
+  it("disableChromiumPasswordManager merges Preferences without clobbering", async () => {
+    const profileDir = await mkdtemp(path.join(os.tmpdir(), "relist-prefs-"));
+    try {
+      const { mkdir: mkdirFs, writeFile: writeFileFs } = await import("node:fs/promises");
+      await mkdirFs(path.join(profileDir, "Default"), { recursive: true });
+      const prefsPath = path.join(profileDir, "Default", "Preferences");
+      await writeFileFs(prefsPath, JSON.stringify({
+        credentials_enable_service: true,
+        profile: { name: "Person", password_manager_enabled: true },
+        unrelated: { keep: 1 },
+      }));
+      await disableChromiumPasswordManager(profileDir);
+      const merged = JSON.parse(await readFile(prefsPath, "utf8")) as Record<string, unknown>;
+      expect(merged.credentials_enable_service).toBe(false);
+      expect(merged.profile).toEqual({ name: "Person", password_manager_enabled: false });
+      expect(merged.unrelated).toEqual({ keep: 1 });
+
+      // A corrupt Preferences file is tolerated and replaced with the
+      // two settings that matter.
+      await writeFileFs(prefsPath, "not json{");
+      await disableChromiumPasswordManager(profileDir);
+      const repaired = JSON.parse(await readFile(prefsPath, "utf8")) as Record<string, unknown>;
+      expect(repaired.credentials_enable_service).toBe(false);
+      expect(repaired.profile).toEqual({ password_manager_enabled: false });
+    } finally {
+      await rm(profileDir, { recursive: true, force: true });
+    }
   });
 });
