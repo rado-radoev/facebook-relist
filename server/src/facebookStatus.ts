@@ -7,13 +7,21 @@
 //   connected          A live Facebook session (c_user cookie present)
 //   needs_check        Facebook is showing a checkpoint / 2FA / approval page
 //   expired            Was connected before, but the session cookie is gone
+//   verifying          Login may have finished, but the strict §6 Connected
+//                      ceremony has not (yet) confirmed it in a fresh context
+//   profile_busy       The persistent profile cannot be opened right now
+//                      (launch pending or profile closing/locked); this is
+//                      NOT "not connected" — it is a transient state that
+//                      is never persisted as the stored status
 
 export type FacebookStatus =
   | "not_connected"
   | "login_in_progress"
   | "connected"
   | "needs_check"
-  | "expired";
+  | "expired"
+  | "verifying"
+  | "profile_busy";
 
 export const FACEBOOK_STATUSES: FacebookStatus[] = [
   "not_connected",
@@ -21,6 +29,8 @@ export const FACEBOOK_STATUSES: FacebookStatus[] = [
   "connected",
   "needs_check",
   "expired",
+  "verifying",
+  "profile_busy",
 ];
 
 export interface PageSignals {

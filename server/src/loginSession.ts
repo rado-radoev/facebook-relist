@@ -32,7 +32,7 @@ import {
 import type { FacebookStatus } from "./facebookStatus.js";
 
 export type FieldKind = "email" | "password" | "code" | "other" | null;
-export type LoginHint = "default" | "save_browser" | "push_2fa" | "code_entry" | "parked";
+export type LoginHint = "default" | "save_browser" | "push_2fa" | "code_entry" | "parked" | "passkey";
 export type LoginStateName = "streaming" | "connected" | "parked" | "ended";
 export type ResyncVerdict = "intact" | "adopt" | "reset";
 
@@ -830,6 +830,20 @@ export class LoginSessionRegistry {
 
     let hint: LoginHint = "default";
     if (
+      lowerText.includes("security key") ||
+      lowerText.includes("passkey") ||
+      lowerText.includes("webauthn") ||
+      lowerText.includes("authenticator security key") ||
+      lowerUrl.includes("webauthn") ||
+      lowerUrl.includes("passkey") ||
+      lowerUrl.includes("security_key") ||
+      lowerUrl.includes("security-key")
+    ) {
+      // A security-key/passkey prompt is the person acting with a
+      // physical authenticator: surface it as its own hint. It is NOT
+      // a parked/review state — nothing here may treat it as one.
+      hint = "passkey";
+    } else if (
       lowerText.includes("save this browser") ||
       lowerText.includes("save browser") ||
       lowerText.includes("remember this browser") ||
@@ -877,12 +891,41 @@ export class LoginSessionRegistry {
       state.connectedStreak = 0;
     }
     if (state.connectedStreak >= CONNECTED_POLLS_REQUIRED) {
-      // Connected across 3 consecutive polls: the login is settled.
-      // (No display name is sent: the store's identity is a hash only,
-      // so there is no clean name to report.)
-      state.lastStateSent = "connected";
-      this.sendJson(state, { kind: "state", state: "connected" });
-      await this.finishStreaming(state);
+      // The cheap streak is only the TRIGGER, never the verdict: the
+      // login is settled only when the strict §6 ceremony agrees. The
+      // ceremony drives the automation page, and automation is blocked
+      // while a login page is open — so the login target is closed
+      // FIRST. That is safe at this point (three consecutive polls say
+      // Facebook has taken the login and left the login form behind)
+      // and it is what makes the verdict real instead of the cheap
+      // signal: if the session did not actually persist in the
+      // profile, the ceremony says so and no "connected" is ever sent.
+      try {
+        await this.browser.closeLoginPage(state.userId);
+      } catch {
+        // Already closed or racing teardown — the ceremony's own
+        // checks decide what happens next either way.
+      }
+      let verification: FacebookStatus;
+      try {
+        verification = await this.browser.verifyConnected(state.userId);
+      } catch {
+        verification = "verifying";
+      }
+      if (verification === "connected") {
+        // (No display name is sent: the store's identity is a hash
+        // only, so there is no clean name to report.)
+        state.lastStateSent = "connected";
+        this.sendJson(state, { kind: "state", state: "connected" });
+        await this.finishStreaming(state);
+        return;
+      }
+      // Verification is pending or failed: tell the client the honest
+      // "verifying" status, reset the streak so the ceremony re-runs
+      // on a later poll (never in a tight loop), and keep polling.
+      state.connectedStreak = 0;
+      state.lastStatusSent = "verifying";
+      this.sendJson(state, { kind: "status", status: "verifying" });
     }
   }
 
