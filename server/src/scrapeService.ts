@@ -13,7 +13,12 @@
 
 import type { BrowserManager } from "./browserManager.js";
 import type { StoredClone, SyncedListing } from "./cloneTypes.js";
-import { parseEditForm, parseSellingCards } from "./facebookExtract.js";
+import {
+  parseEditForm,
+  parseGallery,
+  parseGallerySlots,
+  parseSellingCards,
+} from "./facebookExtract.js";
 import {
   FileArchive,
   archiveDirFor,
@@ -163,12 +168,43 @@ export class ScrapeService {
       }
 
       const archive = new FileArchive(archiveDirFor(this.dataDir, userId, listingId));
+      // 403 re-mint: a signed CDN URL can expire between snapshot and
+      // download. Re-collect the listing page, re-parse its gallery, and
+      // hand back the URL at the same slot — matched by the original
+      // slot identity when identities are available, else by position.
+      // Any failure to re-collect yields null (no retry).
+      const originalSlots = parseGallerySlots(listingSnapshot);
+      const remint = async (index: number): Promise<string | null> => {
+        try {
+          const freshSnapshot = await this.browser.collectSnapshotAt(
+            userId,
+            listingPageUrl(listingId),
+          );
+          if (!freshSnapshot || !isExpectedPage(freshSnapshot, "listing", listingId)) {
+            return null;
+          }
+          const freshSlots = parseGallerySlots(freshSnapshot);
+          const originalIdentity = originalSlots?.[index]?.identity;
+          if (originalIdentity && freshSlots) {
+            const match = freshSlots.find((slot) => slot.identity === originalIdentity);
+            if (match) {
+              return match.url;
+            }
+          }
+          const freshUrls = parseGallery(freshSnapshot);
+          return freshUrls[index] ?? null;
+        } catch {
+          return null;
+        }
+      };
       const recovery = await recoverCloneData(
       listingId,
       { editStep1, editStep2, listing: listingSnapshot },
       this.downloader,
       archive,
       this.now(),
+      {},
+      { remint },
       );
 
       const existing = this.store.getClone(userId, listingId);

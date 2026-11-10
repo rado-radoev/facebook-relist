@@ -74,11 +74,27 @@ export interface DeliveryEdits {
 
 export type VideoState = "none" | "recovered" | "present_not_downloaded" | "unknown";
 
+/** Per-photo vault record for a successfully recovered photo, aligned
+ *  by position with PhotoRecovery.urls/files. `sha256` is the plain hex
+ *  sha256 of the photo bytes (not the content-addressed file name). */
+export interface VaultPhoto {
+  position: number;
+  file: string;
+  sha256: string;
+  contentType: string;
+  width: number;
+  height: number;
+  bytes: number;
+}
+
 export interface PhotoRecovery {
   /** Every photo URL in stable gallery order; never deduped by position. */
   urls: string[];
   /** Immutable content-addressed archive ids; null when validation/download failed. */
   files: Array<string | null>;
+  /** Vault records aligned by position; null where the photo failed.
+   *  Absent on legacy records recovered before the vault existed. */
+  vault?: Array<VaultPhoto | null>;
   downloaded: number;
   /** Positive count evidence, null when Facebook did not expose a total. */
   expectedCount?: number | null;

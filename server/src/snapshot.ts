@@ -58,12 +58,28 @@ export interface FormSnapshot {
   attributesObserved?: boolean;
 }
 
+export interface PayloadPhoto {
+  id?: string;
+  url: string;
+  width?: number;
+  height?: number;
+}
+
 export interface PageSnapshot {
   url: string;
   /** document.body.innerText — used for prompts and fallbacks. */
   text: string;
   /** Image URLs in DOM order (gallery order on a listing page). */
   images: string[];
+  /**
+   * Photos harvested from the listing detail page's Relay/SSR payload
+   * (`listing_photos`), normalized to the highest-resolution variant per
+   * photo, in payload order. `null` when NO `listing_photos` array exists
+   * anywhere in the payload (payload never captured / gallery never
+   * opened); `[]` when an array exists and is empty (listing genuinely
+   * has no photos). The collector always sets this field.
+   */
+  payloadPhotos?: PayloadPhoto[] | null;
   /** Video URLs the page exposes (video src / source src). */
   videos: string[];
   /** Positive evidence about the page surface; missing metadata is unknown. */
@@ -135,14 +151,91 @@ export const SNAPSHOT_SCRIPT = `(() => {
     readiness: checkpoint ? "checkpoint" : document.readyState === "complete" && (text.trim() || document.querySelector('[role="main"]')) ? "ready" : "loading",
   };
 
+  let payloadPhotos = null;
+  try {
+    const payloadList = [];
+    let payloadFound = false;
+    const collectVariants = (node, out) => {
+      if (!node || typeof node !== "object") return;
+      const uri = typeof node.uri === "string" && node.uri ? node.uri : typeof node.url === "string" && node.url ? node.url : null;
+      if (uri) out.push({ uri, width: typeof node.width === "number" ? node.width : null, height: typeof node.height === "number" ? node.height : null });
+      if (node.image && typeof node.image === "object") collectVariants(node.image, out);
+      const listKeys = ["image_versions", "image_versions2", "versions", "variants", "candidates"];
+      for (const key of listKeys) {
+        const list = node[key];
+        if (Array.isArray(list)) {
+          for (const item of list) collectVariants(item, out);
+        } else if (list && typeof list === "object" && Array.isArray(list.candidates)) {
+          for (const item of list.candidates) collectVariants(item, out);
+        }
+      }
+    };
+    const normalizePayloadPhoto = (entry) => {
+      if (typeof entry === "string") return entry ? { url: entry } : null;
+      if (!entry || typeof entry !== "object") return null;
+      const variants = [];
+      collectVariants(entry, variants);
+      const seenUris = new Set();
+      const uniq = [];
+      for (const variant of variants) {
+        if (!seenUris.has(variant.uri)) { seenUris.add(variant.uri); uniq.push(variant); }
+      }
+      if (!uniq.length) return null;
+      let chosen = uniq[0];
+      const withWidth = uniq.filter((variant) => typeof variant.width === "number");
+      if (withWidth.length) {
+        chosen = withWidth.reduce((best, variant) => (variant.width > best.width ? variant : best), withWidth[0]);
+      } else {
+        const withHeight = uniq.filter((variant) => typeof variant.height === "number");
+        if (withHeight.length) chosen = withHeight.reduce((best, variant) => (variant.height > best.height ? variant : best), withHeight[0]);
+      }
+      const imageObject = entry.image && typeof entry.image === "object" ? entry.image : null;
+      const rawId = entry.id ?? entry.pk ?? entry.fbid ?? entry.photo_id ?? (imageObject ? (imageObject.id ?? imageObject.pk ?? imageObject.fbid ?? null) : null);
+      const result = { url: chosen.uri };
+      if (rawId !== null && rawId !== undefined && rawId !== "") result.id = String(rawId);
+      if (typeof chosen.width === "number") result.width = chosen.width;
+      if (typeof chosen.height === "number") result.height = chosen.height;
+      return result;
+    };
+    const walkPayload = (node) => {
+      if (!node || typeof node !== "object") return;
+      if (Array.isArray(node)) { for (const item of node) walkPayload(item); return; }
+      for (const key of Object.keys(node)) {
+        const value = node[key];
+        if (key === "listing_photos" && Array.isArray(value)) {
+          payloadFound = true;
+          for (const entry of value) {
+            const normalized = normalizePayloadPhoto(entry);
+            if (normalized) payloadList.push(normalized);
+          }
+        } else {
+          walkPayload(value);
+        }
+      }
+    };
+    for (const scriptEl of document.querySelectorAll('script[type="application/json"]')) {
+      const rawText = scriptEl.textContent || "";
+      if (!rawText.trim()) continue;
+      let parsed;
+      try { parsed = JSON.parse(rawText); } catch { continue; }
+      walkPayload(parsed);
+    }
+    if (payloadFound) payloadPhotos = payloadList;
+  } catch {
+    payloadPhotos = null;
+  }
+
   const videos = [];
   const galleryNodes = [...document.querySelectorAll('[role="main"] [role="group"][aria-label], [role="main"] [role="region"][aria-label]')]
     .filter((node) => /photo|gallery|listing images/i.test(node.getAttribute("aria-label") || ""));
   const galleryNode = galleryNodes.length === 1 ? galleryNodes[0] : null;
   const images = [];
   const identities = [];
-  if (galleryNode) {
-    for (const img of galleryNode.querySelectorAll("img")) {
+  const galleryScope = galleryNode || document.querySelector('[role="main"]');
+  if (galleryScope) {
+    let scopedImgs = [...galleryScope.querySelectorAll('img[alt^="Product photo of"]')];
+    if (!scopedImgs.length && galleryNode) scopedImgs = [...galleryNode.querySelectorAll("img")];
+    for (const img of scopedImgs) {
       const src = img.currentSrc || img.src || "";
       if (!src) continue;
       const parsed = new URL(src, location.href);
@@ -152,6 +245,8 @@ export const SNAPSHOT_SCRIPT = `(() => {
       identities.push(identity);
       images.push(src);
     }
+  }
+  if (galleryNode) {
     for (const video of galleryNode.querySelectorAll("video")) {
       const src = video.currentSrc || video.src || "";
       if (src) videos.push(src);
@@ -165,13 +260,36 @@ export const SNAPSHOT_SCRIPT = `(() => {
   const galleryCountMatch = /\\bof\\s+(\\d+)\\b/i.exec(galleryLabel + " " + galleryText);
   const galleryCountAttribute = galleryNode ? galleryNode.getAttribute("data-count") : null;
   const galleryExpected = galleryCountMatch ? Number(galleryCountMatch[1]) : galleryCountAttribute && /^\\d+$/.test(galleryCountAttribute) ? Number(galleryCountAttribute) : null;
-  const gallery = {
+  let gallery = {
     state: galleryNode && galleryExpected !== null && galleryExpected === images.length ? "complete" : galleryNode && galleryExpected !== null ? "incomplete" : "unknown",
     expectedCount: galleryExpected,
     observedCount: images.length,
     videoPresence: videos.length > 0 ? "present" : /0 videos?|no videos?/i.test(galleryLabel + " " + galleryText) ? "absent" : "unknown",
     slots: images.map((url, index) => ({ identity: identities[index], url })),
   };
+  if (payloadPhotos !== null) {
+    const payloadUrls = payloadPhotos.map((photo) => photo.url);
+    const payloadIdentities = payloadPhotos.map((photo) => {
+      if (photo.id) return photo.id;
+      try {
+        const parsed = new URL(photo.url, location.href);
+        return parsed.searchParams.get("fbid") || parsed.searchParams.get("id") || parsed.pathname || photo.url;
+      } catch {
+        return photo.url;
+      }
+    });
+    images.length = 0;
+    for (const url of payloadUrls) images.push(url);
+    identities.length = 0;
+    for (const identity of payloadIdentities) identities.push(identity);
+    gallery = {
+      state: "complete",
+      expectedCount: payloadPhotos.length,
+      observedCount: payloadPhotos.length,
+      videoPresence: gallery.videoPresence,
+      slots: payloadUrls.map((url, index) => ({ identity: payloadIdentities[index], url })),
+    };
+  }
 
   const sellingCards = [];
   const seenCards = new Set();
@@ -304,6 +422,7 @@ export const SNAPSHOT_SCRIPT = `(() => {
     url: location.href,
     text,
     images,
+    payloadPhotos,
     videos,
     surface,
     completion,
