@@ -31,8 +31,11 @@ export function registerFacebookRoutes(
       await reply.code(401).send({ error: "Not signed in" });
       return;
     }
-    const status = await browser.withUserOperation(user.id, () => browser.refreshStatus(user.id));
-    await reply.send({ status });
+    // reportedStatus, not the cheap refreshStatus: clients must never
+    // be told "connected" on a single cookie signal (§6), and the
+    // answer must never be cached by the PWA's service worker (§6.8).
+    const status = await browser.withUserOperation(user.id, () => browser.reportedStatus(user.id));
+    await reply.header("Cache-Control", "no-store").send({ status });
   });
 
   app.post("/api/facebook/connect", { preHandler: requireAuth }, async (request, reply) => {

@@ -329,8 +329,69 @@ export function parseListingDetails(snapshot: PageSnapshot): ListingDetailsData 
   };
 }
 
-/** Gallery photo URLs in original order (duplicates removed). */
+export interface GallerySlot {
+  identity: string;
+  url: string;
+}
+
+function payloadPhotoIdentity(photo: { id?: string; url: string }): string {
+  if (photo.id) {
+    return photo.id;
+  }
+  try {
+    const parsed = new URL(photo.url);
+    return parsed.searchParams.get("fbid") || parsed.searchParams.get("id") || parsed.pathname || photo.url;
+  } catch {
+    return photo.url;
+  }
+}
+
+/**
+ * Ordered gallery slots (identity + URL). Payload-first: when
+ * `payloadPhotos` is a non-null array the slots derive from the payload
+ * photos (id, or URL fbid/path fallback), otherwise the collector's DOM
+ * gallery slots are used unchanged. Returns null when neither source
+ * provides slots.
+ */
+export function parseGallerySlots(snapshot: PageSnapshot): GallerySlot[] | null {
+  if (Array.isArray(snapshot.payloadPhotos)) {
+    return snapshot.payloadPhotos
+      .filter((photo) => photo && photo.url)
+      .map((photo) => ({ identity: payloadPhotoIdentity(photo), url: photo.url }));
+  }
+  if (snapshot.gallery?.slots) {
+    return snapshot.gallery.slots;
+  }
+  return null;
+}
+
+/**
+ * The gallery a recovery completeness check should judge. When the
+ * payload was captured (`payloadPhotos` is an array, possibly empty) the
+ * payload itself establishes completeness honestly: expected == observed
+ * == payload length, with payload-derived slots. When `payloadPhotos` is
+ * null the snapshot's DOM gallery info is returned untouched — its
+ * completeness requirements are not weakened.
+ */
+export function effectiveGallery(snapshot: PageSnapshot): PageSnapshot["gallery"] {
+  if (Array.isArray(snapshot.payloadPhotos)) {
+    const slots = parseGallerySlots(snapshot) ?? [];
+    return {
+      state: "complete",
+      expectedCount: slots.length,
+      observedCount: slots.length,
+      videoPresence: snapshot.gallery?.videoPresence ?? "unknown",
+      slots,
+    };
+  }
+  return snapshot.gallery;
+}
+
+/** Gallery photo URLs in original order (duplicates removed on the DOM path). */
 export function parseGallery(snapshot: PageSnapshot): string[] {
+  if (Array.isArray(snapshot.payloadPhotos)) {
+    return snapshot.payloadPhotos.filter((photo) => photo && photo.url).map((photo) => photo.url);
+  }
   if (snapshot.gallery?.slots) {
     return snapshot.gallery.slots.map((slot) => slot.url);
   }

@@ -46,7 +46,9 @@ afterEach(() => {
   vi.clearAllMocks();
 });
 
-function renderScreen(facebookStatus: "not_connected" | "connected" | "login_in_progress" = "not_connected") {
+function renderScreen(
+  facebookStatus: "not_connected" | "connected" | "login_in_progress" | "verifying" = "not_connected",
+) {
   const onStatusChange = vi.fn();
   const onBack = vi.fn();
   const utils = render(
@@ -62,31 +64,31 @@ describe("ConnectScreen", () => {
     expect(screen.queryByText(/relist never sees your password/i)).toBeNull();
   });
 
-  it("keeps the Start button disabled until a sign-in method is chosen, and the code choice enables it", () => {
+  it("asks no pre-flight two-factor question and enables the start button immediately", () => {
     renderScreen();
+    // The old "After your password, what does Facebook usually ask you
+    // for?" picker is gone entirely — no question, no choices, nothing
+    // gating the start button.
+    expect(screen.queryByText(/After your password, what does Facebook usually ask you for/)).toBeNull();
+    expect(screen.queryByRole("button", { name: "A code (text message or authenticator app)" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "A security key or passkey" })).toBeNull();
+    expect(screen.queryByText(/That kind of sign-in can't be completed/)).toBeNull();
     const start = screen.getByRole("button", { name: "Open Facebook login" }) as HTMLButtonElement;
-    expect(start.disabled).toBe(true);
-    fireEvent.click(screen.getByRole("button", { name: "A code (text message or authenticator app)" }));
     expect(start.disabled).toBe(false);
   });
 
-  it("the passkey choice blocks start and shows the explanation", () => {
+  it("starting login directly calls connectFacebook and shows the live view", async () => {
     renderScreen();
-    fireEvent.click(screen.getByRole("button", { name: "A security key or passkey" }));
-    expect(
-      screen.getByText(
-        "That kind of sign-in can't be completed in Relist's browser. In Facebook Settings → Password and security, add a text-message or authenticator code option first, then come back.",
-      ),
-    ).toBeTruthy();
-    expect(screen.queryByRole("button", { name: "Open Facebook login" })).toBeNull();
-  });
-
-  it("starting with the code choice calls connectFacebook and shows the live view", async () => {
-    renderScreen();
-    fireEvent.click(screen.getByRole("button", { name: "A code (text message or authenticator app)" }));
     fireEvent.click(screen.getByRole("button", { name: "Open Facebook login" }));
     expect(connectFacebook).toHaveBeenCalledTimes(1);
     expect(await screen.findByText("Mock remote view")).toBeTruthy();
+  });
+
+  it("a verifying status shows a verifying note and does not force the remote view", () => {
+    renderScreen("verifying");
+    expect(screen.getByText("Verifying your Facebook session…")).toBeTruthy();
+    expect(screen.queryByText("Mock remote view")).toBeNull();
+    expect(screen.queryByRole("button", { name: "Open Facebook login" })).toBeNull();
   });
 
   it("resumes an in-flight login on mount", () => {

@@ -15,7 +15,9 @@ import { facebookViewSocketUrl } from "../lib/api";
 import { diffCapture, type CaptureOp } from "../lib/textDiff";
 
 export type LoginState = "streaming" | "connected" | "parked" | "ended";
-export type ViewHint = "default" | "save_browser" | "push_2fa" | "code_entry" | "parked";
+export type ViewHint = "default" | "save_browser" | "push_2fa" | "code_entry" | "parked" | "passkey";
+/** The server names this union LoginHint (server/src/loginSession.ts). */
+export type LoginHint = ViewHint;
 
 interface Props {
   onStatusChange: (status: SessionStatus) => void;
@@ -35,6 +37,8 @@ const HINT_TEXT: Record<ViewHint, string> = {
   save_browser: "Tap Save — so you don't have to do this again soon",
   push_2fa: "Approve the login in your Facebook app, or check your texts",
   code_entry: "Enter the code Facebook sent you",
+  passkey:
+    "Facebook is asking for a security key, which can't be used here — choose 'Try another way' on Facebook's page to get a code instead.",
   parked: "",
 };
 

@@ -9,7 +9,9 @@ export type SessionStatus =
   | "login_in_progress"
   | "connected"
   | "needs_check"
-  | "expired";
+  | "expired"
+  | "verifying"
+  | "profile_busy";
 
 /**
  * The one person signed in to Relist on this device. There is deliberately

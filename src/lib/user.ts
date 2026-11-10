@@ -17,6 +17,8 @@ export const SESSION_META: Record<SessionStatus, SessionMeta> = {
   needs_check: { label: "Check your phone", color: "#f9e2af" },
   expired: { label: "Session expired", color: "#f9e2af" },
   not_connected: { label: "Not connected", color: "#a6adc8" },
+  verifying: { label: "Verifying…", color: "#89b4fa" },
+  profile_busy: { label: "Browser busy", color: "#f9e2af" },
 };
 
 export function firstName(displayName: string): string {

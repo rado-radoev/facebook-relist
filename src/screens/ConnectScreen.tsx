@@ -9,18 +9,12 @@ interface Props {
   onBack: () => void;
 }
 
-type TwoFactorChoice = "code" | "passkey" | null;
-
 const DISCLOSURE =
   "When you sign in here, your Facebook password passes briefly through this app's memory on your own home server before Facebook receives it — it is never saved or logged, but if that server were compromised at that exact moment, the password could be captured, so use a password you don't reuse anywhere else.";
-
-const PASSKEY_EXPLANATION =
-  "That kind of sign-in can't be completed in Relist's browser. In Facebook Settings → Password and security, add a text-message or authenticator code option first, then come back.";
 
 export default function ConnectScreen({ facebookStatus, onStatusChange, onBack }: Props) {
   const [starting, setStarting] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [choice, setChoice] = useState<TwoFactorChoice>(null);
   const [loginState, setLoginState] = useState<LoginState | null>(null);
   const [connectedName, setConnectedName] = useState<string | undefined>(undefined);
 
@@ -86,6 +80,20 @@ export default function ConnectScreen({ facebookStatus, onStatusChange, onBack }
     );
   }
 
+  if (facebookStatus === "verifying") {
+    // The backend is confirming a session it already holds. There is
+    // nothing to log into and no remote view to show yet — just say so.
+    return (
+      <div className="screen">
+        <button type="button" className="back-button" onClick={onBack}>
+          ← Back
+        </button>
+        <h1 className="screen-title">Connect Facebook</h1>
+        <p className="empty-note">Verifying your Facebook session…</p>
+      </div>
+    );
+  }
+
   if (facebookStatus === "connected") {
     // Already connected before this visit (we did not just finish a login
     // here — that path renders the success screen above instead).
@@ -118,39 +126,9 @@ export default function ConnectScreen({ facebookStatus, onStatusChange, onBack }
         <p style={{ margin: 0, lineHeight: 1.5, fontSize: 14 }}>{DISCLOSURE}</p>
       </section>
 
-      <section className="card">
-        <h2 className="card-title">After your password, what does Facebook usually ask you for?</h2>
-        <div className="check-picker" role="group" aria-label="Two-factor sign-in method">
-          <button
-            type="button"
-            className={`check-chip${choice === "code" ? " check-chip-current" : ""}`}
-            aria-pressed={choice === "code"}
-            onClick={() => setChoice("code")}
-          >
-            A code (text message or authenticator app)
-          </button>
-          <button
-            type="button"
-            className={`check-chip${choice === "passkey" ? " check-chip-current" : ""}`}
-            aria-pressed={choice === "passkey"}
-            onClick={() => setChoice("passkey")}
-          >
-            A security key or passkey
-          </button>
-        </div>
-        {choice === "passkey" ? <p className="blocked-note" style={{ marginTop: 10 }}>{PASSKEY_EXPLANATION}</p> : null}
-      </section>
-
-      {choice !== "passkey" ? (
-        <button
-          type="button"
-          className="primary-button"
-          onClick={handleStart}
-          disabled={starting || choice !== "code"}
-        >
-          {starting ? "Opening Facebook…" : "Open Facebook login"}
-        </button>
-      ) : null}
+      <button type="button" className="primary-button" onClick={handleStart} disabled={starting}>
+        {starting ? "Opening Facebook…" : "Open Facebook login"}
+      </button>
 
       {error ? <p className="auth-error">{error}</p> : null}
     </div>

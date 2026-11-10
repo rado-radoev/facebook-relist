@@ -547,13 +547,25 @@ export class JobService {
     job.lastPolledAt = now.toISOString();
     job.pollCount += 1;
 
+    // Blueprint §5 step 10: "available" on the listing page is not
+    // enough — the new listing's own gallery must also verify (photo
+    // count + first-photo identity) before the job may enter the
+    // "available" state that later authorises deleting the old listing.
+    // A verification that comes back unknown is handled exactly like
+    // still-in-review below: keep watching, never delete.
+    let photoVerificationPendingReason: string | null = null;
     if (availability === "available") {
-      job.status = "available";
-      job.availableAt = now.toISOString();
-      job.nextPollAt = null;
-      this.audit(job, "poll_available", `The new listing is live: ${job.newListingUrl}`);
-      await this.persist(job);
-      return true;
+      const photoCheck = await this.checkPublishedPhotos(job);
+      if (photoCheck.state === "verified") {
+        job.status = "available";
+        job.availableAt = now.toISOString();
+        job.nextPollAt = null;
+        this.audit(job, "poll_available", `The new listing is live: ${job.newListingUrl}`);
+        await this.persist(job);
+        return true;
+      }
+      photoVerificationPendingReason =
+        photoCheck.reason ?? "The new listing's photos could not be verified yet.";
     }
     if (availability === "gone") {
       job.status = "failed";
@@ -578,13 +590,59 @@ export class JobService {
       return true;
     }
     job.nextPollAt = new Date(now.getTime() + this.nextPollDelay()).toISOString();
-    this.audit(
-      job,
-      "poll_in_review",
-      `Still in review (check #${job.pollCount}); next check in about ${Math.round(this.options.pollIntervalMs / 60000)} minutes.`,
-    );
+    if (photoVerificationPendingReason !== null) {
+      this.audit(
+        job,
+        "poll_photo_verification_pending",
+        `The new listing is live but photo verification is pending: ${photoVerificationPendingReason} ` +
+          `The old listing has NOT been deleted; next check in about ${Math.round(this.options.pollIntervalMs / 60000)} minutes.`,
+      );
+    } else {
+      this.audit(
+        job,
+        "poll_in_review",
+        `Still in review (check #${job.pollCount}); next check in about ${Math.round(this.options.pollIntervalMs / 60000)} minutes.`,
+      );
+    }
     await this.persist(job);
     return false;
+  }
+
+  /** The expected gallery of the new listing, verified by the driver
+   *  when it supports it. Drivers without the optional
+   *  verifyPublishedListing method (older fakes) skip the extra check —
+   *  their "available" read is taken as before. The expected photo count
+   *  comes from the job's own clone data; the first photo's stable
+   *  identity is derived from the stored clone via the store (parallel
+   *  to its photo files, honouring the job's photo selection order). */
+  private async checkPublishedPhotos(
+    job: RecreateJob,
+  ): Promise<{ state: "verified" | "unknown"; reason: string | null }> {
+    const verify = this.driver.verifyPublishedListing;
+    if (typeof verify !== "function") {
+      return { state: "verified", reason: null };
+    }
+    return verify.call(this.driver, job.userId, job.newListingId as string, {
+      photoCount: job.data.photoFiles.length,
+      firstPhotoIdentity: this.firstPhotoIdentity(job),
+    });
+  }
+
+  private firstPhotoIdentity(job: RecreateJob): string | null {
+    const firstFile = job.data.photoFiles[0];
+    if (!firstFile) {
+      return null;
+    }
+    const photos = this.store.getClone(job.userId, job.listingId)?.recovery?.photos;
+    if (!photos || !Array.isArray(photos.files) || !Array.isArray(photos.identities)) {
+      return null;
+    }
+    const index = photos.files.indexOf(firstFile);
+    if (index < 0) {
+      return null;
+    }
+    const identity = photos.identities[index];
+    return typeof identity === "string" && identity.length > 0 ? identity : null;
   }
 
   private async stepDelete(job: RecreateJob): Promise<boolean> {
@@ -767,13 +825,26 @@ export class JobService {
       return true;
     }
     const result = await this.driver.verifyRecreate(job.userId, job.listingId, job.newListingId);
+    // Post-delete verification per the research blueprint (§5/§6): the
+    // old listing must be gone BOTH ways (absent from a complete
+    // reloaded selling list AND its own page reporting the unavailable
+    // state — that is verifyRecreate's oldGone), the new listing must
+    // be listed under the exact id, and the clone-anchored photo check
+    // (count + first-photo identity against the stored clone) must
+    // verify fresh. An earlier version of this gate also demanded a
+    // seller id and byte-equality with the approved payload hash from
+    // verifyRecreate; no honest driver can produce either from page
+    // evidence (the hash covers the archived media bytes, which
+    // Facebook's recompression makes unrecoverable from the live
+    // listing), so that form of the gate could only ever pass with
+    // test doubles. The blueprint's evidence bar replaces it.
+    const published = await this.checkPublishedPhotos(job);
     if (
       result.complete &&
       result.oldGone &&
       result.newListed &&
       result.newListingId === job.newListingId &&
-      result.newSellerId !== null &&
-      result.newPayloadHash === job.approvedPayloadHash
+      published.state === "verified"
     ) {
       this.audit(
         job,
@@ -792,11 +863,10 @@ export class JobService {
     if (!result.newListed || result.newListingId !== job.newListingId) {
       problems.push("the new listing does not appear in the selling list");
     }
-    if (!result.newSellerId) {
-      problems.push("the new listing seller could not be verified");
-    }
-    if (result.newPayloadHash !== job.approvedPayloadHash) {
-      problems.push("the new listing payload does not match the approved clone");
+    if (published.state !== "verified") {
+      problems.push(
+        `the new listing's photos could not be verified against the approved clone${published.reason ? `: ${published.reason}` : ""}`,
+      );
     }
     job.status = "failed";
     job.error = `Verification failed: ${problems.join(" and ")}. Check Facebook before doing anything else.`;

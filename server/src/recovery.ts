@@ -18,14 +18,26 @@ import type {
   CloneRecovery,
   PhotoRecovery,
   VideoRecovery,
+  VaultPhoto,
 } from "./cloneTypes.js";
 import {
   buildCloneFields,
+  effectiveGallery,
   parseEditForm,
   parseGallery,
   parseListingDetails,
 } from "./facebookExtract.js";
 import type { PageSnapshot } from "./snapshot.js";
+
+export type { VaultPhoto } from "./cloneTypes.js";
+
+/** Re-mint a fresh CDN URL for the photo at `index` (e.g. after a 403
+ *  from an expired signed URL). Returns null when no fresh URL is available. */
+export type RemintCallback = (index: number) => Promise<string | null>;
+
+export interface RecoverPhotosOptions {
+  remint?: RemintCallback;
+}
 
 export type FileDownloader = (url: string) => Promise<Buffer>;
 
@@ -185,7 +197,10 @@ function mediaContentType(data: Buffer): string | null {
   return (data as Buffer & { contentType?: string }).contentType ?? null;
 }
 
-export async function validateImage(data: Buffer, deps: ImageDecodeDeps = {}): Promise<{ extension: string; format: string }> {
+async function validateImageDetailed(
+  data: Buffer,
+  deps: ImageDecodeDeps = {},
+): Promise<{ extension: string; format: string; contentType: string; width: number; height: number }> {
   if (!data.length || data.length > MAX_MEDIA_BYTES) throw new Error("Image is empty or exceeds the 25 MB limit");
   const info = await decodeImageInfo(data, deps);
   const formats: Record<string, { extension: string; contentType: string }> = {
@@ -199,7 +214,12 @@ export async function validateImage(data: Buffer, deps: ImageDecodeDeps = {}): P
   if (!supported || info.width < 1 || info.height < 1) throw new Error("Downloaded content is not a supported, decodable image");
   const declared = mediaContentType(data);
   if (declared && declared !== supported.contentType) throw new Error("Image media type does not match decoded bytes");
-  return { extension: supported.extension, format };
+  return { extension: supported.extension, format, contentType: supported.contentType, width: info.width, height: info.height };
+}
+
+export async function validateImage(data: Buffer, deps: ImageDecodeDeps = {}): Promise<{ extension: string; format: string }> {
+  const { extension, format } = await validateImageDetailed(data, deps);
+  return { extension, format };
 }
 
 async function validateVideo(data: Buffer): Promise<{ extension: string; contentType: string }> {
@@ -230,15 +250,22 @@ export interface RecoveryInput {
   listing: PageSnapshot;
 }
 
+function isHttp403(error: unknown): boolean {
+  return error instanceof Error && /\b403\b/.test(error.message);
+}
+
 async function recoverPhotos(
   urls: string[],
   gallery: PageSnapshot["gallery"],
   downloader: FileDownloader,
   archive: ArchiveWriter,
   imageDeps: ImageDecodeDeps = {},
+  options: RecoverPhotosOptions = {},
 ): Promise<PhotoRecovery> {
   const files: Array<string | null> = [];
   const reasons: Array<string | null> = [];
+  const vault: Array<VaultPhoto | null> = [];
+  const effectiveUrls = [...urls];
   let downloaded = 0;
   if (!gallery?.slots || gallery.slots.length !== urls.length || gallery.slots.some((slot, index) => slot.url !== urls[index] || !slot.identity)) {
     throw new Error("Listing gallery is missing ordered stable media identities");
@@ -246,29 +273,78 @@ async function recoverPhotos(
   const slots = gallery.slots;
   const identities = slots.map((slot) => slot.identity);
   if (new Set(identities).size !== identities.length) throw new Error("Listing gallery contains duplicate media identities");
-  for (const [index, url] of urls.entries()) {
+  for (const [index, originalUrl] of urls.entries()) {
+    // Download phase: only a download error indicating HTTP 403 (an
+    // expired signed CDN URL) earns one re-mint + retry. Validation or
+    // archive failures, and any other download error, never re-mint.
+    let data: Buffer | null = null;
+    let downloadError: unknown = null;
     try {
-      const data = await downloader(url);
-      const { extension } = await validateImage(data, imageDeps);
-      const identity = gallery.slots[index].identity;
-      const fileName = `photo-${createHash("sha256").update(identity).update(data).digest("hex")}.${extension}`;
-      await archive.save(fileName, data);
-      files.push(fileName);
-      reasons.push(null);
-      downloaded += 1;
+      data = await downloader(originalUrl);
     } catch (error) {
+      if (options.remint && isHttp403(error)) {
+        let fresh: string | null = null;
+        try {
+          fresh = await options.remint(index);
+        } catch {
+          fresh = null;
+        }
+        if (fresh) {
+          effectiveUrls[index] = fresh;
+          try {
+            data = await downloader(fresh);
+          } catch (retryError) {
+            downloadError = retryError;
+          }
+        } else {
+          downloadError = error;
+        }
+      } else {
+        downloadError = error;
+      }
+    }
+    if (downloadError !== null || data === null) {
       // A failed photo is recorded as missing-at-that-slot, never dropped
       // silently and never replaced with another listing's image.
       files.push(null);
+      vault.push(null);
+      reasons.push(
+        downloadError instanceof Error
+          ? downloadError.message
+          : "Photo could not be validated or downloaded.",
+      );
+      continue;
+    }
+    try {
+      const detailed = await validateImageDetailed(data, imageDeps);
+      const identity = slots[index].identity;
+      const fileName = `photo-${createHash("sha256").update(identity).update(data).digest("hex")}.${detailed.extension}`;
+      await archive.save(fileName, data);
+      files.push(fileName);
+      vault.push({
+        position: index,
+        file: fileName,
+        sha256: createHash("sha256").update(data).digest("hex"),
+        contentType: detailed.contentType,
+        width: detailed.width,
+        height: detailed.height,
+        bytes: data.length,
+      });
+      reasons.push(null);
+      downloaded += 1;
+    } catch (error) {
+      files.push(null);
+      vault.push(null);
       reasons.push(error instanceof Error ? error.message : "Photo could not be validated or downloaded.");
     }
   }
   return {
-    urls,
+    urls: effectiveUrls,
     files,
+    vault,
     downloaded,
     expectedCount: gallery?.expectedCount ?? null,
-    complete: Boolean(gallery?.state === "complete" && gallery.expectedCount === urls.length && files.every(Boolean)),
+    complete: Boolean(gallery?.state === "complete" && gallery.expectedCount === effectiveUrls.length && files.every(Boolean)),
     identities,
     reasons,
   };
@@ -310,6 +386,7 @@ export async function recoverCloneData(
   archive: ArchiveWriter,
   now: Date = new Date(),
   imageDeps: ImageDecodeDeps = {},
+  options: RecoverPhotosOptions = {},
 ): Promise<CloneRecovery> {
   if (input.listing.surface?.kind !== "listing" || input.listing.surface.readiness !== "ready" || input.listing.surface.listingId !== listingId) {
     throw new Error("The listing surface identity or readiness does not match the requested listing");
@@ -320,7 +397,7 @@ export async function recoverCloneData(
   if (input.editStep2 && (input.editStep2.surface?.kind !== "edit_form" || input.editStep2.surface.readiness !== "ready" || input.editStep2.surface.listingId !== listingId)) {
     throw new Error("The Step 2 surface identity or readiness does not match the requested listing");
   }
-  const gallery = input.listing.gallery;
+  const gallery = effectiveGallery(input.listing);
   const urls = parseGallery(input.listing);
   if (!gallery || gallery.state !== "complete" || gallery.expectedCount === null || gallery.expectedCount !== gallery.observedCount || gallery.observedCount !== urls.length) {
     throw new Error("Listing gallery completeness is missing or inconsistent");
@@ -328,7 +405,7 @@ export async function recoverCloneData(
   const edit = input.editStep1 ? parseEditForm(input.editStep1, input.editStep2) : null;
   const details = parseListingDetails(input.listing);
   const fields = buildCloneFields(edit, details);
-  const photos = await recoverPhotos(urls, gallery, downloader, archive, imageDeps);
+  const photos = await recoverPhotos(urls, gallery, downloader, archive, imageDeps, options);
   const video = await recoverVideo(input.listing.videos, gallery.videoPresence, downloader, archive);
 
   return {

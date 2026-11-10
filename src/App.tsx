@@ -48,6 +48,26 @@ export default function App() {
     void loadSession();
   }, [refreshFacebookStatus]);
 
+  // Never trust a status we fetched before the app was backgrounded: a
+  // login finished in the backend browser while the PWA sat in the
+  // background must show up the moment the app returns to the foreground.
+  useEffect(() => {
+    function handleVisibilityChange() {
+      if (document.visibilityState === "visible") {
+        void refreshFacebookStatus();
+      }
+    }
+    function handleFocus() {
+      void refreshFacebookStatus();
+    }
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+    window.addEventListener("focus", handleFocus);
+    return () => {
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
+      window.removeEventListener("focus", handleFocus);
+    };
+  }, [refreshFacebookStatus]);
+
   const handleStatusChange = useCallback((status: SessionStatus) => {
     setFacebookStatus(status);
   }, []);

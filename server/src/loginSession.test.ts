@@ -110,6 +110,18 @@ function makeFakePage(init: Partial<FakePageState> & { withCdp?: boolean } = {})
       if (expression.includes("relist-page-state")) {
         return { text: state.pageText, hasCodeField: state.hasCodeField };
       }
+      if (expression.includes("isSellingPath")) {
+        // The §6 ceremony's snapshot of the selling page: a ready,
+        // empty Your Listings view.
+        return {
+          url: state.url,
+          text: state.pageText,
+          images: [],
+          videos: [],
+          surface: { kind: "selling_list", readiness: "ready" },
+          sellingCards: [],
+        };
+      }
       if (expression.includes("relist-clear-field")) {
         state.focusValue = "";
         return true;
@@ -476,7 +488,12 @@ describe("LoginSessionRegistry", () => {
 
   it("settles to connected after 3 consecutive connected polls and closes only the login page", async () => {
     const { login } = await attach();
-    fake.cookies = [{ name: "c_user", value: "synthetic-facebook-user" }];
+    // The strict §6 ceremony requires BOTH session cookies; the cheap
+    // signal alone (c_user) must never settle a login.
+    fake.cookies = [
+      { name: "c_user", value: "synthetic-facebook-user" },
+      { name: "xs", value: "synthetic-session-secret" },
+    ];
     fake.auto.state.url = "https://www.facebook.com/";
 
     await registry.pollOnce(userId);
@@ -495,6 +512,27 @@ describe("LoginSessionRegistry", () => {
     // The browser profile/session itself is kept.
     expect(browser.hasActiveSession(userId)).toBe(true);
     expect(browser.statusOf(userId)).toBe("connected");
+  });
+
+  it("never settles when the session cookie is missing (the login did not persist)", async () => {
+    // Regression for the owner's report: she finished the Facebook
+    // login (the cheap signal — a c_user cookie — was present and the
+    // old build flashed "Connected"), yet the session had not really
+    // persisted and the app went back to "Connect Facebook" with no
+    // explanation. Here xs never arrives: the ceremony must refuse to
+    // settle, the honest "verifying" status must be reported, and no
+    // "connected" state may ever be sent.
+    await attach();
+    fake.cookies = [{ name: "c_user", value: "synthetic-facebook-user" }];
+    fake.auto.state.url = "https://www.facebook.com/";
+
+    for (let index = 0; index < 5; index += 1) {
+      await registry.pollOnce(userId);
+    }
+    expect(socket.ofKind("state")).toEqual([{ kind: "state", state: "streaming" }]);
+    expect(socket.ofKind("status").map((entry) => entry.status)).toContain("verifying");
+    // The session stays alive and keeps watching — no silent give-up.
+    expect(registry.hasSession(userId)).toBe(true);
   });
 
   it("keeps the session alive across a socket close and reattaches with the same salt", async () => {

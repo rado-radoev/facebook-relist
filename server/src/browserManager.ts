@@ -7,15 +7,17 @@
 // browser instead of a real Chromium.
 
 import { AsyncLocalStorage } from "node:async_hooks";
+import { createHash } from "node:crypto";
 import { chmod, mkdir, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import type { WebSocket } from "ws";
 import type { ProxyConfig } from "./config.js";
 import {
   detectFacebookStatus,
+  urlNeedsCheck,
   type FacebookStatus,
 } from "./facebookStatus.js";
-import { SNAPSHOT_SCRIPT, type PageSnapshot } from "./snapshot.js";
+import { SELLING_LIST_URL, SNAPSHOT_SCRIPT, type PageSnapshot } from "./snapshot.js";
 import { profileDirFor, type Store } from "./store.js";
 
 export const FACEBOOK_LOGIN_URL = "https://www.facebook.com/login";
@@ -37,9 +39,60 @@ export interface CdpSessionLike {
   detach?(): Promise<void>;
 }
 
-const DESKTOP_USER_AGENT =
+/**
+ * The ONE user agent for every launch of a Relist profile — login view
+ * and automation alike. Identity discipline (research blueprint §6):
+ * a UA/fingerprint divergence between login and checking is a proven
+ * session-killer (a `HeadlessChrome` UA made the `c_user` cookie vanish
+ * from a correctly reused profile), so this is a real desktop Chrome UA
+ * with no "HeadlessChrome" marker, and nothing anywhere in the login
+ * flow may override it.
+ */
+export const RELIST_USER_AGENT =
   "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 " +
   "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
+
+const PROFILE_LOCK_PATTERN = /already in use|singleton|profile.*lock/i;
+
+/** True when an error looks like a persistent-profile lock failure —
+ *  another (or a crashed) browser still holding the userDataDir. */
+export function isProfileLockError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error ?? "");
+  return PROFILE_LOCK_PATTERN.test(message);
+}
+
+/**
+ * A launch failed because the persistent profile is locked/in use.
+ * Callers must be able to distinguish this from "not connected": the
+ * session may be perfectly valid, the profile is simply busy.
+ */
+export class ProfileBusyError extends Error {
+  constructor(message = "Browser profile is already in use", options?: { cause?: unknown }) {
+    super(message, options);
+    this.name = "ProfileBusyError";
+  }
+}
+
+/**
+ * The launchPersistentContext options for a Relist profile. Pure and
+ * exported so a test can assert the identity discipline (above all the
+ * UA) without launching a real Chromium.
+ */
+export function buildLaunchOptions(options: BrowserOptions): {
+  headless: boolean;
+  viewport: typeof VIEWPORT;
+  userAgent: string;
+  proxy: ProxyConfig | undefined;
+  ignoreHTTPSErrors: boolean;
+} {
+  return {
+    headless: true,
+    viewport: VIEWPORT,
+    userAgent: RELIST_USER_AGENT,
+    proxy: options.proxy,
+    ignoreHTTPSErrors: options.ignoreCertErrors ?? false,
+  };
+}
 
 export interface PageLike {
   url(): string;
@@ -72,7 +125,7 @@ export interface PageLike {
 }
 
 export interface ContextLike {
-  cookies(url: string): Promise<Array<{ name: string; value?: string }>>;
+  cookies(url: string): Promise<Array<{ name: string; value?: string; expires?: number }>>;
   clearCookies(): Promise<void>;
   close(): Promise<void>;
   pages(): PageLike[];
@@ -158,7 +211,7 @@ type RawPage = {
 };
 
 type RawContext = {
-  cookies(url: string): Promise<Array<{ name: string; value?: string }>>;
+  cookies(url: string): Promise<Array<{ name: string; value?: string; expires?: number }>>;
   clearCookies(): Promise<void>;
   close(): Promise<void>;
   pages(): RawPage[];
@@ -244,13 +297,10 @@ function makeDefaultLauncher(options: BrowserOptions): BrowserLauncher {
     // The password manager must be off before Chromium reads the profile.
     await disableChromiumPasswordManager(profileDir);
     const { chromium } = await import("playwright");
-    const rawContext = await chromium.launchPersistentContext(profileDir, {
-      headless: true,
-      viewport: VIEWPORT,
-      userAgent: DESKTOP_USER_AGENT,
-      proxy: options.proxy,
-      ignoreHTTPSErrors: options.ignoreCertErrors ?? false,
-    }) as unknown as RawContext;
+    const rawContext = await chromium.launchPersistentContext(
+      profileDir,
+      buildLaunchOptions(options),
+    ) as unknown as RawContext;
     const { context, wrapPage } = wrapContext(rawContext);
     const existing = rawContext.pages()[0];
     const rawPage = existing ?? (await rawContext.newPage());
@@ -331,6 +381,15 @@ export class BrowserManager {
   private readonly sensitiveUrlMarkers = ["/login", "checkpoint", "two_factor", "confirm_identity"];
   private readonly socketsByToken = new Map<string, Set<WebSocket>>();
   private readonly socketsByUser = new Map<string, Set<WebSocket>>();
+  /** Profile dir recorded at launch time, per user. The login flow and
+   *  every worker entry point share ensureSession, so the dir recorded
+   *  here is the ONE profile that serves both — see profileIdFor. */
+  private readonly activeProfileIds = new Map<string, string>();
+  /** Users whose strict §6 Connected ceremony (verifyConnected) has
+   *  passed in THIS browser session. Cleared whenever the session
+   *  closes, is disconnected, or is restarted for re-verification, so a
+   *  cached "connected" can never outlive the context that proved it. */
+  private readonly verifiedUsers = new Set<string>();
   private shuttingDown = false;
   private readonly launcher: BrowserLauncher;
   private readonly unsubscribeRevocation: () => void;
@@ -424,6 +483,34 @@ export class BrowserManager {
     return this.sessions.has(userId);
   }
 
+  /** The persistent profile dir for this user — the profileId logged /
+   *  asserted by both the login path and every worker entry point.
+   *  Deterministic in (dataDir, userId): there is exactly one profile
+   *  per user, and ensureSession launches with exactly this dir. */
+  profileIdFor(userId: string): string {
+    return profileDirFor(this.dataDir, userId);
+  }
+
+  /** The profileId of the user's live (or launching) session, recorded
+   *  by ensureSession at launch time; null when no session is active. */
+  activeProfileId(userId: string): string | null {
+    return this.activeProfileIds.get(userId) ?? null;
+  }
+
+  /**
+   * True when the user's profile cannot be opened right now for a
+   * transient reason: the user is closing/disconnecting, or a launch is
+   * pending with no live session behind it (a launch that fails with a
+   * profile-lock error is surfaced as ProfileBusyError instead). A busy
+   * profile is NOT evidence of "not connected" (§6.6).
+   */
+  profileBusy(userId: string): boolean {
+    if (this.closingUsers.has(userId)) {
+      return true;
+    }
+    return this.pendingLaunches.has(userId) && !this.sessions.has(userId);
+  }
+
   statusOf(userId: string): FacebookStatus {
     const user = this.store.findUserById(userId);
     return user ? user.facebookStatus : "not_connected";
@@ -445,11 +532,35 @@ export class BrowserManager {
 
     const pending: PendingLaunch = { promise: Promise.resolve(undefined as never), cancelled: false };
     const promise = (async () => {
-      const profileDir = profileDirFor(this.dataDir, userId);
+      // By construction, the launched profile IS profileIdFor(userId) —
+      // the same dir the login path and every worker entry share — and
+      // it is recorded before the launch so activeProfileId reflects
+      // the in-flight launch as well as the live session.
+      const profileDir = this.profileIdFor(userId);
+      this.activeProfileIds.set(userId, profileDir);
       await mkdir(profileDir, { recursive: true, mode: 0o700 });
       await chmod(profileDir, 0o700);
-      const handle = await this.launcher(profileDir);
+      let handle: BrowserHandle;
+      try {
+        handle = await this.launcher(profileDir);
+      } catch (error) {
+        if (this.activeProfileIds.get(userId) === profileDir && !this.sessions.has(userId)) {
+          this.activeProfileIds.delete(userId);
+        }
+        if (isProfileLockError(error)) {
+          // A locked profile is "busy", never "not connected": annotate
+          // the failure so callers can tell the two apart.
+          throw new ProfileBusyError(
+            error instanceof Error ? error.message : "Browser profile is already in use",
+            { cause: error },
+          );
+        }
+        throw error;
+      }
       if (pending.cancelled || this.shuttingDown) {
+        if (this.activeProfileIds.get(userId) === profileDir && !this.sessions.has(userId)) {
+          this.activeProfileIds.delete(userId);
+        }
         await handle.context.close().catch(() => undefined);
         throw new Error("Browser launch was cancelled");
       }
@@ -493,6 +604,11 @@ export class BrowserManager {
   async refreshStatus(userId: string): Promise<FacebookStatus> {
     const session = this.sessions.get(userId);
     if (!session) {
+      if (this.profileBusy(userId)) {
+        // Transient, never persisted: a busy profile must not overwrite
+        // the stored status, and must not be read as not_connected.
+        return "profile_busy";
+      }
       return this.statusOf(userId);
     }
     const cookies = await session.handle.context.cookies("https://www.facebook.com");
@@ -506,18 +622,208 @@ export class BrowserManager {
     if (next !== this.statusOf(userId)) {
       await this.store.setFacebookStatus(userId, next);
     }
+    if (next !== "connected") {
+      // A cheap check that no longer sees a session invalidates any
+      // earlier strict verification in this browser session.
+      this.verifiedUsers.delete(userId);
+    }
     if (next === "connected" && userCookie?.value) {
       const previousIdentity = this.store.getFacebookIdentityHash(userId);
       const identityChanged = await this.store.setFacebookIdentity(userId, userCookie.value);
       if (identityChanged) {
         await rm(path.join(this.dataDir, "archive", userId), { recursive: true, force: true });
         if (previousIdentity) {
+          this.verifiedUsers.delete(userId);
           await this.store.setFacebookStatus(userId, "needs_check");
           return "needs_check";
         }
       }
     }
     return next;
+  }
+
+  /**
+   * One pass of the §6 checks against the CURRENT context (no restart):
+   * cookies, selling-page URL, hydration, and stored identity. Returns
+   * "connected" only as a candidate — verifyConnected still owes the
+   * flush + re-open pass before anything may be reported connected.
+   * `previousStatus` is the stored status captured by the caller before
+   * this ceremony began, so a mid-ceremony write cannot rewrite the
+   * "was it connected / was a login in progress" history.
+   */
+  private async verifyPass(
+    userId: string,
+    previousStatus: FacebookStatus,
+  ): Promise<{ status: FacebookStatus; cUser: string | null }> {
+    const session = this.sessions.get(userId);
+    if (!session) {
+      return { status: "verifying", cUser: null };
+    }
+    let cookies: Array<{ name: string; value?: string; expires?: number }>;
+    try {
+      cookies = await session.handle.context.cookies("https://www.facebook.com");
+    } catch {
+      return { status: "verifying", cUser: null };
+    }
+    const nowSeconds = Date.now() / 1000;
+    const unexpired = (cookie?: { expires?: number }): boolean =>
+      Boolean(cookie) &&
+      (cookie!.expires === undefined || cookie!.expires === -1 || cookie!.expires > nowSeconds);
+    const userCookie = cookies.find((cookie) => cookie.name === "c_user");
+    const sessionCookie = cookies.find((cookie) => cookie.name === "xs");
+    if (!unexpired(userCookie) || !unexpired(sessionCookie)) {
+      if (previousStatus === "connected") {
+        return { status: "expired", cUser: userCookie?.value ?? null };
+      }
+      if (previousStatus === "login_in_progress" || previousStatus === "verifying") {
+        return { status: "verifying", cUser: userCookie?.value ?? null };
+      }
+      return { status: "not_connected", cUser: userCookie?.value ?? null };
+    }
+    const cUser = userCookie?.value ?? null;
+    if (!cUser) {
+      return { status: "verifying", cUser: null };
+    }
+    // Identity against the store's record, with the same semantics as
+    // refreshStatus: a c_user that hashes differently from the identity
+    // on record is a different account until a human confirms it.
+    let storedIdentityHash: string | null = null;
+    try {
+      storedIdentityHash = this.store.getFacebookIdentityHash(userId);
+    } catch {
+      storedIdentityHash = null;
+    }
+    if (storedIdentityHash) {
+      const candidateHash = createHash("sha256").update(cUser).digest("hex");
+      if (candidateHash !== storedIdentityHash) {
+        return { status: "needs_check", cUser };
+      }
+    }
+    const snapshot = await this.collectSnapshotAt(userId, SELLING_LIST_URL);
+    if (!snapshot) {
+      return { status: "verifying", cUser };
+    }
+    const currentSession = this.sessions.get(userId);
+    const finalUrl = currentSession ? currentSession.handle.page.url() : snapshot.url;
+    if (urlNeedsCheck(finalUrl) || /consent/i.test(finalUrl)) {
+      return { status: "needs_check", cUser };
+    }
+    if (finalUrl.toLowerCase().includes("/login")) {
+      return {
+        status: previousStatus === "connected" ? "expired" : "login_in_progress",
+        cUser,
+      };
+    }
+    if (snapshot.surface?.kind !== "selling_list" || snapshot.surface?.readiness !== "ready") {
+      return { status: "verifying", cUser };
+    }
+    return { status: "connected", cUser };
+  }
+
+  /**
+   * Flush + re-open: close the current context and launch a fresh one
+   * from the SAME userDataDir. Deliberately NOT built on disconnect /
+   * withUserOperation — it must be safe to call from inside a user
+   * operation (the status route) without deadlocking on the queue it
+   * is already holding, and it never deletes the profile.
+   */
+  private async restartContext(userId: string): Promise<void> {
+    this.verifiedUsers.delete(userId);
+    const session = this.sessions.get(userId);
+    if (session) {
+      clearInterval(session.poller);
+      this.sessions.delete(userId);
+      await session.handle.context.close().catch(() => undefined);
+    }
+    await this.ensureSession(userId);
+  }
+
+  /**
+   * The strict §6 Connected ceremony — ONE pass. (Polling comes from
+   * repeated calls by the login poller and the status route; a single
+   * call never loops.) "connected" is returned only when every check
+   * passes in the worker's own context AND again after the context is
+   * flushed and re-opened from the same profile with the same identity.
+   */
+  async verifyConnected(userId: string): Promise<FacebookStatus> {
+    if (this.loginPages.has(userId)) {
+      // Never navigate (or restart) mid-login: the cheap status of the
+      // context the person is logging into is the only honest answer.
+      return this.refreshStatus(userId);
+    }
+    if (this.profileBusy(userId)) {
+      return "profile_busy";
+    }
+    const previousStatus = this.statusOf(userId);
+    try {
+      await this.ensureSession(userId);
+    } catch (error) {
+      if (error instanceof ProfileBusyError || isProfileLockError(error)) {
+        return "profile_busy";
+      }
+      return "verifying";
+    }
+    const first = await this.verifyPass(userId, previousStatus);
+    if (first.status !== "connected") {
+      return first.status;
+    }
+    try {
+      await this.restartContext(userId);
+    } catch (error) {
+      if (error instanceof ProfileBusyError || isProfileLockError(error)) {
+        return "profile_busy";
+      }
+      return "verifying";
+    }
+    const second = await this.verifyPass(userId, previousStatus);
+    if (second.status !== "connected") {
+      // A shortfall in the re-open pass is "verifying", unless that
+      // pass produced a more specific state worth surfacing as-is.
+      if (
+        second.status === "needs_check" ||
+        second.status === "login_in_progress" ||
+        second.status === "expired" ||
+        second.status === "profile_busy"
+      ) {
+        return second.status;
+      }
+      return "verifying";
+    }
+    if (first.cUser !== second.cUser) {
+      // The account changed across the restart: not the session that
+      // was just verified.
+      return "needs_check";
+    }
+    try {
+      const storedIdentityHash = this.store.getFacebookIdentityHash(userId);
+      if (second.cUser && !storedIdentityHash) {
+        await this.store.setFacebookIdentity(userId, second.cUser);
+      }
+    } catch {
+      // Identity bookkeeping must not veto a ceremony that passed.
+    }
+    await this.store.setFacebookStatus(userId, "connected");
+    this.verifiedUsers.add(userId);
+    return "connected";
+  }
+
+  /**
+   * The client-facing status: the cheap refreshStatus, upgraded to the
+   * strict ceremony whenever it claims "connected". refreshStatus's
+   * stored behaviour is unchanged (baseline callers depend on it), but
+   * no client may be told "connected" on the cheap signal alone —
+   * unless this browser session has already verified the user, in
+   * which case the ceremony is not re-run.
+   */
+  async reportedStatus(userId: string): Promise<FacebookStatus> {
+    const cheap = await this.refreshStatus(userId);
+    if (cheap !== "connected") {
+      return cheap;
+    }
+    if (this.verifiedUsers.has(userId)) {
+      return "connected";
+    }
+    return this.verifyConnected(userId);
   }
 
   /** True while a dedicated Connect login page is open for this user. */
@@ -531,7 +837,16 @@ export class BrowserManager {
   }
 
   /** Apply the login page's per-target emulation via CDP. The login page
-   *  is a separate target, so this never resizes the automation page. */
+   *  is a separate target, so this never resizes the automation page.
+   *
+   *  Identity discipline: the login page is phone-sized for readability
+   *  ONLY — viewport metrics + touch are emulated here, and the user
+   *  agent is NEVER overridden (no CDP user-agent override anywhere):
+   *  identity signals (UA etc.) stay identical to the
+   *  automation context's, because UA divergence between login and
+   *  checking is the proven session-killer (§6.2). The viewport
+   *  difference is an accepted, documented risk; the UA difference is
+   *  not. */
   private async applyLoginEmulation(page: PageLike): Promise<void> {
     if (!page.cdp) {
       return;
@@ -787,6 +1102,8 @@ export class BrowserManager {
   private async closeSession(userId: string): Promise<void> {
     this.closingUsers.add(userId);
     this.loginPages.delete(userId);
+    this.verifiedUsers.delete(userId);
+    this.activeProfileIds.delete(userId);
     this.closeUserSockets(userId);
     const pending = this.pendingLaunches.get(userId);
     if (pending) {
