@@ -18,7 +18,7 @@
 import path from "node:path";
 import type { BrowserManager } from "./browserManager.js";
 import type { SyncedListing } from "./cloneTypes.js";
-import { parseSellingCards } from "./facebookExtract.js";
+import { parseGallery, parseSellingCards } from "./facebookExtract.js";
 import {
   interpretListingAvailability,
   matchesFingerprint,
@@ -64,6 +64,13 @@ export interface NewListingCheck {
   listingId: string | null;
   sellerMatchesOwner: boolean | null;
   payloadHash: string | null;
+}
+
+export interface PublishedListingVerification {
+  /** "verified" only when every check positively passed; any shortfall
+   *  is "unknown" — never a false verified. */
+  state: "verified" | "unknown";
+  reason: string | null;
 }
 
 export interface RecreateOriginalSnapshot {
@@ -115,6 +122,16 @@ export interface MarketplaceDriver {
   verifyNewListing(userId: string, listingId: string, url: string, payloadHash: string): Promise<NewListingCheck>;
   /** Post-delete verification: old gone from the selling list, new in it. */
   verifyRecreate(userId: string, oldListingId: string, newListingId: string): Promise<VerifyResult>;
+  /** Blueprint §5 step 10 (optional so test fakes that never drive the
+   *  watch step keep working; the job service feature-detects it):
+   *  confirm the NEW listing itself — present in a complete selling
+   *  list, its detail page readable, and its gallery matching the
+   *  expected photo count (and first-photo identity, when known). */
+  verifyPublishedListing?(
+    userId: string,
+    newListingId: string,
+    expected: { photoCount: number; firstPhotoIdentity?: string | null },
+  ): Promise<PublishedListingVerification>;
   /** Delete a listing. In dry-run, open the delete flow but stop before
    *  the final confirm — nothing is deleted. */
   deleteListing(
@@ -253,6 +270,48 @@ export const DELETE_CONFIRM_SCRIPT = `/* relist-delete-confirm */ (() => {
   return false;
 })()`;
 
+/** Count the photo thumbnails rendered in the create form's photo /
+ *  upload section after an upload. Returns the count, or null when no
+ *  photo/upload section can be found at all (the driver treats that as
+ *  "unknown", never as zero). Best-effort and LIVE-UNVERIFIED, like the
+ *  other collector scripts: it looks inside sections labelled for
+ *  photos/uploads/media, skips avatar/profile/icon images and tiny
+ *  (<32px) chrome, and counts each remaining <img> once. */
+export const UPLOAD_COUNT_SCRIPT = `/* relist-upload-count */ (() => {
+  const sections = [...document.querySelectorAll("[aria-label], [data-testid]")].filter((el) => {
+    const hint = (el.getAttribute("aria-label") || "") + " " + (el.getAttribute("data-testid") || "");
+    return /photo|upload|media/i.test(hint);
+  });
+  if (sections.length === 0) {
+    return null;
+  }
+  const seen = new Set();
+  let count = 0;
+  for (const section of sections) {
+    for (const img of section.querySelectorAll("img")) {
+      if (seen.has(img)) {
+        continue;
+      }
+      seen.add(img);
+      const src = img.currentSrc || img.src || "";
+      if (!src) {
+        continue;
+      }
+      const label = ((img.getAttribute("alt") || "") + " " + (img.getAttribute("aria-label") || "")).toLowerCase();
+      if (/avatar|profile|icon/.test(label)) {
+        continue;
+      }
+      const width = img.width || img.naturalWidth || 0;
+      const height = img.height || img.naturalHeight || 0;
+      if (width > 0 && width < 32 && height > 0 && height < 32) {
+        continue;
+      }
+      count += 1;
+    }
+  }
+  return count;
+})()`;
+
 const ITEM_ID_PATTERN = /\/marketplace\/item\/(\d+)/;
 
 interface SellingListEvidence {
@@ -306,6 +365,10 @@ function isExpectedListingSurface(snapshot: PageSnapshot, listingId: string): bo
 
 // ---------------------------------------------------------------------------
 // Real driver
+
+/** Bounded polls for the create form's thumbnails to render after an
+ *  upload (blueprint §5 step 9) before the count is called settled. */
+const UPLOAD_COUNT_MAX_ATTEMPTS = 10;
 
 export type PaceFn = () => Promise<void>;
 
@@ -387,6 +450,15 @@ export class FacebookDriver implements MarketplaceDriver {
       return { kind: "unknown", reason: "The photo upload control could not be found on the create form." };
     }
     await this.pace();
+
+    // Blueprint §5 step 9: prove the uploads actually landed BEFORE the
+    // form is filled in and long before any Publish/Post click. The
+    // assertion is on the photo count only — a video, when present, is
+    // uploaded too but has no thumbnail count to assert against here.
+    const uploadCheck = await this.verifyUploadedPhotoCount(userId, photoPaths.length);
+    if (uploadCheck.kind !== "verified") {
+      return uploadCheck;
+    }
 
     await this.browser.runScript(userId, fillFieldScript("title", data.title));
     await this.pace();
@@ -482,6 +554,47 @@ export class FacebookDriver implements MarketplaceDriver {
     };
   }
 
+  /** Poll the create form's rendered photo thumbnails until they match
+   *  the number of uploaded photos. A count that never materialises
+   *  (script returns null / a non-number) is "unknown" — the create must
+   *  not publish blind; a count that settles at any other number is
+   *  "blocked", also without publishing. */
+  private async verifyUploadedPhotoCount(
+    userId: string,
+    expectedCount: number,
+  ): Promise<
+    | { kind: "verified" }
+    | { kind: "blocked"; reason: string }
+    | { kind: "unknown"; reason: string }
+  > {
+    let observed: number | null = null;
+    for (let attempt = 0; attempt < UPLOAD_COUNT_MAX_ATTEMPTS; attempt += 1) {
+      const raw = await this.browser.runScript(userId, UPLOAD_COUNT_SCRIPT);
+      if (typeof raw === "number" && Number.isFinite(raw) && raw >= 0) {
+        observed = raw;
+        if (raw === expectedCount) {
+          return { kind: "verified" };
+        }
+      }
+      if (attempt < UPLOAD_COUNT_MAX_ATTEMPTS - 1) {
+        await this.pace();
+      }
+    }
+    if (observed === null) {
+      return {
+        kind: "unknown",
+        reason: "The photo uploads could not be verified on the create form.",
+      };
+    }
+    return {
+      kind: "blocked",
+      reason:
+        `The create form shows ${observed} photo thumbnail${observed === 1 ? "" : "s"}, ` +
+        `but ${expectedCount} photo${expectedCount === 1 ? " was" : "s were"} uploaded — ` +
+        "the listing was not published. Check the photos and try again.",
+    };
+  }
+
   async checkListing(userId: string, listingId: string): Promise<ListingAvailability> {
     await this.requireConnected(userId);
     const snapshot: PageSnapshot | null = await this.browser.collectSnapshotAt(
@@ -540,6 +653,64 @@ export class FacebookDriver implements MarketplaceDriver {
     return { state: "unknown", listingId: null, sellerMatchesOwner: null, payloadHash: null };
   }
 
+  /** Blueprint §5 step 10: verify the NEW listing itself before the job
+   *  may treat it as available (the state that later authorises deleting
+   *  the old listing). Every shortfall returns "unknown" with a specific
+   *  reason — this never produces a false verified:
+   *  (1) a COMPLETE selling-list read must contain the new listing;
+   *  (2) its own detail page must be the expected listing surface;
+   *  (3) its gallery must hold exactly the expected number of photos
+   *      and, when the first photo's stable identity is known, the
+   *      first gallery slot must carry that identity. */
+  async verifyPublishedListing(
+    userId: string,
+    newListingId: string,
+    expected: { photoCount: number; firstPhotoIdentity?: string | null },
+  ): Promise<PublishedListingVerification> {
+    const unknown = (reason: string): PublishedListingVerification => ({
+      state: "unknown",
+      reason,
+    });
+    await this.requireConnected(userId);
+
+    const listSnapshot = await this.browser.collectSnapshotAt(userId, SELLING_LIST_URL);
+    if (!listSnapshot || !isCompleteSellingList(listSnapshot)) {
+      return unknown(
+        "The selling list could not be read completely, so the new listing's photos could not be verified.",
+      );
+    }
+    const cards = parseSellingCards(listSnapshot.sellingCards, this.now());
+    if (!cards.some((card) => card.id === newListingId)) {
+      return unknown("The new listing does not appear in the selling list yet.");
+    }
+
+    const detail = await this.browser.collectSnapshotAt(userId, listingPageUrl(newListingId));
+    if (!detail) {
+      return unknown("The new listing's page could not be opened, so its photos could not be verified.");
+    }
+    if (!isExpectedListingSurface(detail, newListingId)) {
+      return unknown("The new listing's page could not be confirmed, so its photos could not be verified.");
+    }
+
+    const photoUrls = parseGallery(detail);
+    if (photoUrls.length !== expected.photoCount) {
+      return unknown(
+        `The new listing's gallery shows ${photoUrls.length} photo${photoUrls.length === 1 ? "" : "s"}, ` +
+          `but ${expected.photoCount} were uploaded.`,
+      );
+    }
+    if (expected.firstPhotoIdentity) {
+      const firstIdentity = detail.gallery?.slots?.[0]?.identity ?? null;
+      if (!firstIdentity) {
+        return unknown("The new listing's first photo identity could not be read.");
+      }
+      if (firstIdentity !== expected.firstPhotoIdentity) {
+        return unknown("The new listing's first photo does not match the clone's first photo.");
+      }
+    }
+    return { state: "verified", reason: null };
+  }
+
   async verifyRecreate(
     userId: string,
     oldListingId: string,
@@ -547,11 +718,21 @@ export class FacebookDriver implements MarketplaceDriver {
   ): Promise<VerifyResult> {
     await this.requireConnected(userId);
     const snapshot = await this.browser.collectSnapshotAt(userId, SELLING_LIST_URL);
-    const complete = Boolean(snapshot && isCompleteSellingList(snapshot));
-    const cards = complete ? parseSellingCards(snapshot!.sellingCards!, this.now()) : [];
+    const listComplete = Boolean(snapshot && isCompleteSellingList(snapshot));
+    const cards = listComplete ? parseSellingCards(snapshot!.sellingCards!, this.now()) : [];
     const newCard = cards.find((card) => card.id === newListingId);
+    // Blueprint §6: "old gone" needs BOTH proofs — the old id absent
+    // from a complete, reloaded selling list AND the old listing's own
+    // page reporting the unavailable ("gone") state. An item page that
+    // reads "unknown" leaves the whole verification incomplete, never
+    // a presumed-gone.
+    const oldAvailability = await this.checkListing(userId, oldListingId);
+    const complete = listComplete && oldAvailability !== "unknown";
     return {
-      oldGone: complete && !cards.some((card) => card.id === oldListingId),
+      oldGone:
+        complete &&
+        !cards.some((card) => card.id === oldListingId) &&
+        oldAvailability === "gone",
       newListed: Boolean(newCard),
       complete,
       newListingId: newCard?.id ?? null,
