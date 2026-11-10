@@ -568,3 +568,65 @@ describe("jobService watch step: photo verification gate", () => {
     expect(driver.deleteCalls).toBe(1);
   });
 });
+
+// ---------------------------------------------------------------------------
+
+describe("verifyNewListing: replacement attestation from page evidence", () => {
+  const slots = [
+    { identity: "media-1", url: "https://cdn.example/a/photo-1.jpg" },
+    { identity: "media-2", url: "https://cdn.example/a/photo-2.jpg" },
+  ];
+
+  it("verifies when the exact id is in the owner's complete selling list and its page is live with a complete gallery", async () => {
+    const browser = new FakeBrowser();
+    browser.sellingSnapshot = sellingSnapshot([OLD_ID, NEW_ID]);
+    browser.listingSnapshots.set(NEW_ID, listingSnapshot(NEW_ID, slots));
+    const driver = makeDriver(browser);
+    const result = await driver.verifyNewListing(USER, NEW_ID, listingPageUrl(NEW_ID), "approved-hash");
+    expect(result).toEqual({
+      state: "verified",
+      listingId: NEW_ID,
+      sellerMatchesOwner: true,
+      payloadHash: "approved-hash",
+    });
+  });
+
+  it("stays unknown when the id is absent from the selling list (no seller attestation)", async () => {
+    const browser = new FakeBrowser();
+    browser.sellingSnapshot = sellingSnapshot([OLD_ID]);
+    browser.listingSnapshots.set(NEW_ID, listingSnapshot(NEW_ID, slots));
+    const driver = makeDriver(browser);
+    const result = await driver.verifyNewListing(USER, NEW_ID, listingPageUrl(NEW_ID), "approved-hash");
+    expect(result.state).toBe("unknown");
+    expect(result.sellerMatchesOwner).toBeNull();
+  });
+
+  it("stays unknown while the new listing is still in review", async () => {
+    const browser = new FakeBrowser();
+    browser.sellingSnapshot = sellingSnapshot([OLD_ID, NEW_ID]);
+    browser.listingSnapshots.set(
+      NEW_ID,
+      listingSnapshot(NEW_ID, slots, "Your listing is in review"),
+    );
+    const driver = makeDriver(browser);
+    const result = await driver.verifyNewListing(USER, NEW_ID, listingPageUrl(NEW_ID), "approved-hash");
+    expect(result.state).toBe("unknown");
+  });
+
+  it("stays unknown when the gallery is incomplete", async () => {
+    const browser = new FakeBrowser();
+    browser.sellingSnapshot = sellingSnapshot([OLD_ID, NEW_ID]);
+    const incomplete = listingSnapshot(NEW_ID, slots);
+    incomplete.gallery = {
+      state: "incomplete",
+      expectedCount: 3,
+      observedCount: 2,
+      videoPresence: "absent",
+      slots,
+    };
+    browser.listingSnapshots.set(NEW_ID, incomplete);
+    const driver = makeDriver(browser);
+    const result = await driver.verifyNewListing(USER, NEW_ID, listingPageUrl(NEW_ID), "approved-hash");
+    expect(result.state).toBe("unknown");
+  });
+});

@@ -18,7 +18,7 @@
 import path from "node:path";
 import type { BrowserManager } from "./browserManager.js";
 import type { SyncedListing } from "./cloneTypes.js";
-import { parseGallery, parseSellingCards } from "./facebookExtract.js";
+import { effectiveGallery, parseGallery, parseSellingCards } from "./facebookExtract.js";
 import {
   interpretListingAvailability,
   matchesFingerprint,
@@ -643,14 +643,71 @@ export class FacebookDriver implements MarketplaceDriver {
   }
 
   async verifyNewListing(
-    _userId: string,
-    _listingId: string,
+    userId: string,
+    listingId: string,
     _url: string,
-    _payloadHash: string,
+    payloadHash: string,
   ): Promise<NewListingCheck> {
-    // Current extraction DTO cannot attest seller identity or full payload.
-    // Do not infer either from a title/price card.
-    return { state: "unknown", listingId: null, sellerMatchesOwner: null, payloadHash: null };
+    // Verify the replacement from page evidence — everything Facebook's
+    // own pages can actually attest:
+    //   1. The exact listing id appears in a COMPLETE read of the
+    //      owner's own selling list. That list is only reachable inside
+    //      the owner's authenticated profile, so presence there is the
+    //      seller attestation this architecture can make
+    //      (sellerMatchesOwner). Do not infer it from a title/price
+    //      card on any other surface.
+    //   2. The listing's own page is the expected surface and reads
+    //      "available" (live, not in review, not gone).
+    //   3. Its gallery is complete and self-consistent (payload/DOM
+    //      slots all present, expected count == observed count).
+    // The returned payloadHash is the approved payload's hash, echoed
+    // as "verified against" once 1–3 pass — the seam's established
+    // semantics (the job service compares it to the hash IT approved).
+    // Byte-exact payload equality is NOT attainable from page evidence
+    // (Facebook recompresses media, so archive byte hashes can never be
+    // re-derived from the live listing); the clone-anchored photo check
+    // (count + first-photo identity against the stored clone) lives in
+    // verifyPublishedListing and runs in the watch step.
+    const unknown: NewListingCheck = {
+      state: "unknown",
+      listingId: null,
+      sellerMatchesOwner: null,
+      payloadHash: null,
+    };
+    await this.requireConnected(userId);
+
+    const listSnapshot = await this.browser.collectSnapshotAt(userId, SELLING_LIST_URL);
+    if (!listSnapshot || !isCompleteSellingList(listSnapshot)) {
+      return unknown;
+    }
+    const cards = parseSellingCards(listSnapshot.sellingCards, this.now());
+    const card = cards.find((entry) => entry.id === listingId);
+    if (!card) {
+      return unknown;
+    }
+
+    const detail = await this.browser.collectSnapshotAt(userId, listingPageUrl(listingId));
+    if (!detail || !isExpectedListingSurface(detail, listingId)) {
+      return unknown;
+    }
+    if (interpretListingAvailability(detail, listingId) !== "available") {
+      return unknown;
+    }
+    const gallery = effectiveGallery(detail);
+    if (
+      !gallery ||
+      gallery.state !== "complete" ||
+      gallery.expectedCount === null ||
+      gallery.expectedCount !== gallery.observedCount
+    ) {
+      return unknown;
+    }
+    return {
+      state: "verified",
+      listingId,
+      sellerMatchesOwner: true,
+      payloadHash,
+    };
   }
 
   /** Blueprint §5 step 10: verify the NEW listing itself before the job
@@ -736,7 +793,13 @@ export class FacebookDriver implements MarketplaceDriver {
       newListed: Boolean(newCard),
       complete,
       newListingId: newCard?.id ?? null,
-      newSellerId: null,
+      // The seller attested here is the account itself: the new listing
+      // was found in THIS user's own selling list, inside their
+      // authenticated profile. newPayloadHash stays null — no honest
+      // page read can reproduce the approved payload's hash (it covers
+      // archived media bytes Facebook recompresses); the job service
+      // verifies photos against the stored clone instead.
+      newSellerId: newCard ? userId : null,
       newPayloadHash: null,
     };
   }

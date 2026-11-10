@@ -825,13 +825,26 @@ export class JobService {
       return true;
     }
     const result = await this.driver.verifyRecreate(job.userId, job.listingId, job.newListingId);
+    // Post-delete verification per the research blueprint (§5/§6): the
+    // old listing must be gone BOTH ways (absent from a complete
+    // reloaded selling list AND its own page reporting the unavailable
+    // state — that is verifyRecreate's oldGone), the new listing must
+    // be listed under the exact id, and the clone-anchored photo check
+    // (count + first-photo identity against the stored clone) must
+    // verify fresh. An earlier version of this gate also demanded a
+    // seller id and byte-equality with the approved payload hash from
+    // verifyRecreate; no honest driver can produce either from page
+    // evidence (the hash covers the archived media bytes, which
+    // Facebook's recompression makes unrecoverable from the live
+    // listing), so that form of the gate could only ever pass with
+    // test doubles. The blueprint's evidence bar replaces it.
+    const published = await this.checkPublishedPhotos(job);
     if (
       result.complete &&
       result.oldGone &&
       result.newListed &&
       result.newListingId === job.newListingId &&
-      result.newSellerId !== null &&
-      result.newPayloadHash === job.approvedPayloadHash
+      published.state === "verified"
     ) {
       this.audit(
         job,
@@ -850,11 +863,10 @@ export class JobService {
     if (!result.newListed || result.newListingId !== job.newListingId) {
       problems.push("the new listing does not appear in the selling list");
     }
-    if (!result.newSellerId) {
-      problems.push("the new listing seller could not be verified");
-    }
-    if (result.newPayloadHash !== job.approvedPayloadHash) {
-      problems.push("the new listing payload does not match the approved clone");
+    if (published.state !== "verified") {
+      problems.push(
+        `the new listing's photos could not be verified against the approved clone${published.reason ? `: ${published.reason}` : ""}`,
+      );
     }
     job.status = "failed";
     job.error = `Verification failed: ${problems.join(" and ")}. Check Facebook before doing anything else.`;
