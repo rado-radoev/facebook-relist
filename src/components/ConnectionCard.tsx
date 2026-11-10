@@ -77,6 +77,40 @@ export default function ConnectionCard({ user, onConnect, onDisconnect }: Props)
     );
   }
 
+  if (user.facebookStatus === "verifying") {
+    return (
+      <section className="connection-card">
+        <div className="connection-avatar" aria-hidden="true">
+          {user.initials}
+        </div>
+        <div className="connection-text">
+          <p className="connection-title">Verifying your Facebook session</p>
+          <p className="connection-sub">Confirming with Facebook — this can take a moment</p>
+        </div>
+        <button type="button" className="connect-button" disabled>
+          Verifying…
+        </button>
+      </section>
+    );
+  }
+
+  if (user.facebookStatus === "profile_busy") {
+    return (
+      <section className="connection-card">
+        <div className="connection-avatar" aria-hidden="true">
+          {user.initials}
+        </div>
+        <div className="connection-text">
+          <p className="connection-title">The browser is busy</p>
+          <p className="connection-sub">Finishing another task — try again in a moment</p>
+        </div>
+        <button type="button" className="connect-button" onClick={onConnect}>
+          Continue
+        </button>
+      </section>
+    );
+  }
+
   return (
     <section className="connection-card">
       <div className="connection-avatar" aria-hidden="true">

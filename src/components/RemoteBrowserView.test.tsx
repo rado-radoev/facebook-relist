@@ -245,6 +245,33 @@ describe("RemoteBrowserView", () => {
     expect(onLoginState).toHaveBeenCalledWith("connected", "Test Person");
   });
 
+  it("shows the passkey hint verbatim when the server sends a passkey hint", async () => {
+    const { socket } = await renderAndWelcome();
+    socket.jsonMessage({ kind: "hint", hint: "passkey" });
+    expect(
+      await screen.findByText(
+        "Facebook is asking for a security key, which can't be used here — choose 'Try another way' on Facebook's page to get a code instead.",
+      ),
+    ).toBeTruthy();
+  });
+
+  it("a paste into an empty capture sends exactly one bulk insert op", async () => {
+    const { socket } = await renderAndWelcome();
+    const input = captureInput();
+    const password = "correct horse battery staple";
+    // A paste arrives as ONE input event carrying the whole string at
+    // once (inputType insertFromPaste) — not one event per character.
+    // The component also wires onChange to the same handler, so this
+    // additionally proves the duplicate input/change pair is deduped.
+    fireEvent.input(input, {
+      target: { value: password },
+      inputType: "insertFromPaste",
+    });
+    const ops = socket.sentJson().filter((message) => message.kind === "op");
+    expect(ops).toEqual([{ kind: "op", seq: 1, op: { type: "insert", text: password } }]);
+    expect(input.value).toBe(password);
+  });
+
   it("has no type box, no key buttons, and no reconnect button", async () => {
     await renderAndWelcome();
     expect(screen.queryByPlaceholderText(/Tap a field above/)).toBeNull();
