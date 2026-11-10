@@ -13,6 +13,7 @@ import {
   type MarketplaceDriver,
 } from "./facebookDriver.js";
 import { registerFacebookRoutes } from "./facebookRoutes.js";
+import { LoginSessionRegistry } from "./loginSession.js";
 import { registerJobRoutes } from "./jobRoutes.js";
 import { JobService, type JobServiceOptions } from "./jobService.js";
 import { registerListingsRoutes } from "./listingsRoutes.js";
@@ -24,6 +25,7 @@ export interface AppParts {
   app: FastifyInstance;
   store: Store;
   browser: BrowserManager;
+  loginSessions: LoginSessionRegistry;
   scraper: ScrapeService;
   driver: MarketplaceDriver;
   jobs: JobService;
@@ -62,6 +64,7 @@ export async function buildApp(options: BuildOptions): Promise<AppParts> {
     proxy: browserProxy,
     ignoreCertErrors: config.browserIgnoreCertErrors,
   });
+  const loginSessions = new LoginSessionRegistry(browser);
   const scraper = new ScrapeService(store, browser, config.dataDir, options.downloader);
   const driver = options.driver ?? new FacebookDriver(browser);
   const jobs = new JobService(store, driver, config.dataDir, {
@@ -130,10 +133,14 @@ export async function buildApp(options: BuildOptions): Promise<AppParts> {
 
   app.get("/api/health", async () => ({ ok: true }));
 
+  app.addHook("onClose", async () => {
+    await loginSessions.endAll();
+  });
+
   registerAuthRoutes(app, store, config);
-  registerFacebookRoutes(app, store, browser, config.corsOrigin);
+  registerFacebookRoutes(app, store, browser, config.corsOrigin, loginSessions);
   registerListingsRoutes(app, store, scraper, config.dataDir);
   registerJobRoutes(app, store, jobs, browser);
 
-  return { app, store, browser, scraper, driver, jobs, shim };
+  return { app, store, browser, loginSessions, scraper, driver, jobs, shim };
 }
