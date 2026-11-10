@@ -64,25 +64,47 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   return body as T;
 }
 
-export async function fetchMe(): Promise<ApiUser> {
-  const data = await request<{ user: ApiUser }>("/api/auth/me");
+/**
+ * A 200 response is not proof of a usable payload: a misconfigured proxy
+ * in front of the app can answer 200 with an HTML fallback page, which
+ * request() parses to {}. Auth helpers must reject that like any other
+ * auth failure — otherwise callers store an undefined user and the
+ * render path crashes reading its fields.
+ */
+function isApiUser(value: unknown): value is ApiUser {
+  if (typeof value !== "object" || value === null) {
+    return false;
+  }
+  const user = value as Record<string, unknown>;
+  return typeof user.id === "string" && typeof user.name === "string" && typeof user.email === "string";
+}
+
+function requireApiUser(data: { user?: unknown }): ApiUser {
+  if (!isApiUser(data.user)) {
+    throw new ApiError(502, "Unexpected response from the server: the auth payload has no user.");
+  }
   return data.user;
+}
+
+export async function fetchMe(): Promise<ApiUser> {
+  const data = await request<{ user?: unknown }>("/api/auth/me");
+  return requireApiUser(data);
 }
 
 export async function login(email: string, password: string): Promise<ApiUser> {
-  const data = await request<{ user: ApiUser }>("/api/auth/login", {
+  const data = await request<{ user?: unknown }>("/api/auth/login", {
     method: "POST",
     body: JSON.stringify({ email, password }),
   });
-  return data.user;
+  return requireApiUser(data);
 }
 
 export async function register(name: string, email: string, password: string): Promise<ApiUser> {
-  const data = await request<{ user: ApiUser }>("/api/auth/register", {
+  const data = await request<{ user?: unknown }>("/api/auth/register", {
     method: "POST",
     body: JSON.stringify({ name, email, password }),
   });
-  return data.user;
+  return requireApiUser(data);
 }
 
 export async function logout(): Promise<void> {
@@ -186,8 +208,14 @@ export async function fetchJob(jobId: string): Promise<RecreateJob> {
 }
 
 export async function fetchJobHistory(): Promise<JobHistoryEntry[]> {
-  const data = await request<{ history: JobHistoryEntry[] }>("/api/history");
-  return data.history;
+  const data = await request<{ history?: unknown }>("/api/history");
+  if (!Array.isArray(data.history)) {
+    // HistoryScreen reads .length/.map on this value during render,
+    // outside any try/catch — an undefined here would crash the screen
+    // the same way an undefined auth user crashed the app shell.
+    throw new ApiError(502, "Unexpected response from the server: the history payload is not a list.");
+  }
+  return data.history as JobHistoryEntry[];
 }
 
 /**
