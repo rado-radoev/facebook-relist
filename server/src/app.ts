@@ -12,6 +12,10 @@ import {
   FacebookDriver,
   type MarketplaceDriver,
 } from "./facebookDriver.js";
+import {
+  registerFacebookLoginRoutes,
+  type FacebookLoginDeps,
+} from "./facebookLogin.js";
 import { registerFacebookRoutes } from "./facebookRoutes.js";
 import { LoginSessionRegistry } from "./loginSession.js";
 import { registerJobRoutes } from "./jobRoutes.js";
@@ -45,6 +49,11 @@ export interface BuildOptions {
   /** Overrides for the job service (tests inject a fake clock and turn
    *  dry-run off); defaults come from the server config. */
   jobOptions?: Partial<JobServiceOptions>;
+  /** Injectable Facebook Login dependencies (tests stub the two Graph
+   *  calls so no test talks to Meta, and can drive a fake clock).
+   *  Defaults: the real Graph client from the configured app
+   *  credentials, and the wall clock. */
+  facebookLoginDeps?: FacebookLoginDeps;
 }
 
 export async function buildApp(options: BuildOptions): Promise<AppParts> {
@@ -138,6 +147,7 @@ export async function buildApp(options: BuildOptions): Promise<AppParts> {
   });
 
   registerAuthRoutes(app, store, config);
+  registerFacebookLoginRoutes(app, store, config, options.facebookLoginDeps);
   registerFacebookRoutes(app, store, browser, config.corsOrigin, loginSessions);
   registerListingsRoutes(app, store, scraper, config.dataDir);
   registerJobRoutes(app, store, jobs, browser);

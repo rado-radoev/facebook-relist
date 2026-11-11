@@ -31,7 +31,14 @@ export interface UserRecord {
   id: string;
   name: string;
   email: string;
-  passwordHash: string;
+  /** Null for accounts created via "Sign in to Relist with Facebook" —
+   *  they have no Relist password. Password sign-in for them is a normal
+   *  invalid-credentials failure. */
+  passwordHash: string | null;
+  /** Meta user id linked by "Sign in to Relist with Facebook". This is
+   *  only an identity for Relist's own sign-in; it is NOT the Marketplace
+   *  browser session and never grants access to one. */
+  facebookId?: string;
   facebookStatus: FacebookStatus;
   facebookConnectedAt: string | null;
   createdAt: string;
@@ -180,13 +187,14 @@ export class Store {
     }
   }
 
-  async createUser(input: { name: string; email: string; passwordHash: string }): Promise<UserRecord> {
+  async createUser(input: { name: string; email: string; passwordHash: string | null; facebookId?: string }): Promise<UserRecord> {
     this.ensureLoaded();
     const user: UserRecord = {
       id: randomUUID(),
       name: input.name,
       email: input.email.toLowerCase(),
       passwordHash: input.passwordHash,
+      ...(input.facebookId ? { facebookId: input.facebookId } : {}),
       facebookStatus: "not_connected",
       facebookConnectedAt: null,
       createdAt: new Date().toISOString(),
@@ -200,6 +208,22 @@ export class Store {
     this.ensureLoaded();
     const target = email.toLowerCase();
     return this.data.users.find((user) => user.email === target);
+  }
+
+  findUserByFacebookId(facebookId: string): UserRecord | undefined {
+    this.ensureLoaded();
+    return this.data.users.find((user) => user.facebookId === facebookId);
+  }
+
+  /** Link a Meta user id to an EXISTING Relist user (email match during
+   *  Facebook sign-in). The user's id — and therefore their browser
+   *  profile directory, listings, clones, and jobs — does not change. */
+  async setFacebookId(userId: string, facebookId: string): Promise<void> {
+    this.ensureLoaded();
+    const user = this.findUserById(userId);
+    if (!user) return;
+    user.facebookId = facebookId;
+    await this.save();
   }
 
   findUserById(id: string): UserRecord | undefined {

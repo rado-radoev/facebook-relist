@@ -148,7 +148,10 @@ export function registerAuthRoutes(app: FastifyInstance, store: Store, config: C
       return;
     }
     const user = store.findUserByEmail(credentials.email);
-    if (!user) {
+    if (!user || !user.passwordHash) {
+      // No such account — or an account created via Facebook sign-in,
+      // which has no Relist password. Same response either way: the
+      // reply must not hint at which sign-in method the account uses.
       loginFailures.record(accountKey);
       loginFailures.record(request.ip);
       await reply.code(401).send({ error: "Email or password is incorrect" });
@@ -185,7 +188,7 @@ export function registerAuthRoutes(app: FastifyInstance, store: Store, config: C
   });
 }
 
-function setSessionCookie(reply: FastifyReply, token: string, config: Config): void {
+export function setSessionCookie(reply: FastifyReply, token: string, config: Config): void {
   reply.setCookie(SESSION_COOKIE_NAME, token, {
     httpOnly: true,
     sameSite: "lax",

@@ -72,12 +72,27 @@ export function isAllowedRequestOrigin(origin: string, configuredOrigin: string)
   return LOCAL_ORIGIN_HOSTS.has(host);
 }
 
+export interface FacebookLoginConfig {
+  appId: string;
+  /** Meta app secret: used only server-side for the code→token exchange.
+   *  Never logged, never sent in any response. */
+  appSecret: string;
+}
+
 export interface Config {
   port: number;
   host: string;
   dataDir: string;
   corsOrigin: string;
   cookieSecure: boolean;
+  /**
+   * "Sign in to Relist with Facebook" (Facebook Login as an alternative
+   * way to sign in to RELIST ITSELF). Present only when BOTH
+   * FACEBOOK_APP_ID and FACEBOOK_APP_SECRET are set; otherwise the
+   * feature is fully dark (endpoints 404, the client hides the button).
+   * This never touches the Marketplace browser-session machinery.
+   */
+  facebookLogin?: FacebookLoginConfig;
   tls?: { keyFile: string; certFile: string };
   /** Explicit browser proxy from BROWSER_PROXY; ambient proxy variables are ignored. */
   browserProxy?: ProxyConfig;
@@ -138,6 +153,9 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     dataDir,
     corsOrigin: env.CORS_ORIGIN ?? "http://localhost:5173",
     cookieSecure: env.COOKIE_SECURE === "1",
+    facebookLogin: env.FACEBOOK_APP_ID && env.FACEBOOK_APP_SECRET
+      ? { appId: env.FACEBOOK_APP_ID, appSecret: env.FACEBOOK_APP_SECRET }
+      : undefined,
     // TLS is optional: served only when both files are configured.
     tls: env.TLS_CERT_FILE && env.TLS_KEY_FILE
       ? { certFile: path.resolve(env.TLS_CERT_FILE), keyFile: path.resolve(env.TLS_KEY_FILE) }
