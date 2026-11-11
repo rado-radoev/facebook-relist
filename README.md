@@ -397,6 +397,50 @@ With `COOKIE_SECURE=1` the session cookie is only sent over HTTPS:
 the plain-HTTP LAN address (`http://<docker-host>:5173`) will still
 load, but it will not hold a session — always use the HTTPS address.
 
+## Sign in to Relist with Facebook (optional)
+
+Relist can offer **Continue with Facebook** on its own sign-in screen —
+Facebook confirms who you are TO Relist, so there is no separate Relist
+password to forget. This is only about signing in to the app itself: it
+does **not** connect your Marketplace listings (that is still the
+separate Connect step, with the backend browser, afterwards).
+
+One-time setup, on the owner:
+
+1. Go to [developers.facebook.com](https://developers.facebook.com) →
+   **My Apps → Create App**, and add the **Facebook Login** use case.
+2. In **Facebook Login → Settings**, set **Valid OAuth Redirect URIs**
+   to exactly:
+   `https://fbrelist.superlan.duckdns.org/api/auth/facebook/callback`
+   (your own public Relist address + that path — it must match
+   character for character).
+3. From **App Settings → Basic**, take the **App ID** and **App
+   Secret**, and put them in the Docker host's `.env` (the same file
+   that holds `CORS_ORIGIN`):
+
+   ```sh
+   FACEBOOK_APP_ID=<your app id>
+   FACEBOOK_APP_SECRET=<your app secret>
+   ```
+
+   The secret is a password-grade credential: it belongs only in that
+   `.env` on the Docker host — never in chat, never in git.
+4. Restart the backend (`docker compose up -d`). The sign-in screen now
+   shows **Continue with Facebook**. Leave either variable out and the
+   feature stays fully off: no button, and the endpoints answer 404.
+
+How it works on the phone: tapping the button runs Facebook's own login
+in the browser, then lands on a Relist page that says you're signed in
+and shows a **one-time sign-in code**. The browser that finished the
+Facebook login is not the installed app (iOS keeps their storage
+separate), so if the app doesn't open signed in, tap **I have a sign-in
+code** on the app's sign-in screen and type the code in. Codes work
+once and expire in 10 minutes. Email/password sign-in keeps working
+exactly as before; an account first created through Facebook has no
+Relist password, and if its email matches an existing Relist account,
+the Facebook identity is attached to that existing account — same
+account, same listings, same browser profile.
+
 ## Household accounts — one signed-in person per device
 
 The Relist backend can serve a whole household, but **there is no account
