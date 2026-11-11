@@ -1,5 +1,15 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { ApiError, facebookViewSocketUrl, fetchJobHistory, fetchMe, login, register } from "./api";
+import {
+  ApiError,
+  facebookLoginStartUrl,
+  facebookViewSocketUrl,
+  fetchAuthConfig,
+  fetchJobHistory,
+  fetchMe,
+  login,
+  loginWithFacebookCode,
+  register,
+} from "./api";
 
 afterEach(() => vi.unstubAllGlobals());
 
@@ -84,6 +94,41 @@ describe("auth payload validation", () => {
     stubFetch(jsonResponse({ user: VALID_USER }, 201));
 
     await expect(register("Test User", "test@example.invalid", "password-123")).resolves.toEqual(VALID_USER);
+  });
+});
+
+describe("facebook sign-in helpers", () => {
+  it("fetchAuthConfig reads the enabled flag and defaults anything else to off", async () => {
+    stubFetch(jsonResponse({ facebookLoginEnabled: true }));
+    await expect(fetchAuthConfig()).resolves.toEqual({ facebookLoginEnabled: true });
+
+    stubFetch(jsonResponse({}));
+    await expect(fetchAuthConfig()).resolves.toEqual({ facebookLoginEnabled: false });
+
+    stubFetch(jsonResponse({ facebookLoginEnabled: "yes" }));
+    await expect(fetchAuthConfig()).resolves.toEqual({ facebookLoginEnabled: false });
+  });
+
+  it("facebookLoginStartUrl points at the backend start endpoint", () => {
+    expect(facebookLoginStartUrl()).toBe("/api/auth/facebook/start");
+  });
+
+  it("loginWithFacebookCode resolves a well-formed user through the validated path", async () => {
+    stubFetch(jsonResponse({ user: VALID_USER }));
+    await expect(loginWithFacebookCode("ABCD2345")).resolves.toEqual(VALID_USER);
+  });
+
+  it("loginWithFacebookCode rejects a user-less 200", async () => {
+    stubFetch(jsonResponse({}));
+    await expect(loginWithFacebookCode("ABCD2345")).rejects.toBeInstanceOf(ApiError);
+  });
+
+  it("loginWithFacebookCode surfaces the backend's rejection", async () => {
+    stubFetch(jsonResponse({ error: "That code isn't valid" }, 401));
+    await expect(loginWithFacebookCode("ZZZZZZZZ")).rejects.toMatchObject({
+      status: 401,
+      message: "That code isn't valid",
+    });
   });
 });
 

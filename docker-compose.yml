@@ -20,6 +20,11 @@ services:
       # on Facebook). Set RELIST_DRY_RUN=0 in .env ONLY for a supervised
       # live run.
       RELIST_DRY_RUN: ${RELIST_DRY_RUN:-1}
+      # Optional "Sign in to Relist with Facebook" (the app's own
+      # sign-in): set FACEBOOK_APP_ID + FACEBOOK_APP_SECRET in .env to
+      # enable; unset = the feature is fully off. See README.
+      FACEBOOK_APP_ID: ${FACEBOOK_APP_ID:-}
+      FACEBOOK_APP_SECRET: ${FACEBOOK_APP_SECRET:-}
       DATA_DIR: /data
       PORT: "8787"
     volumes:

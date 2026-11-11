@@ -111,6 +111,35 @@ export async function logout(): Promise<void> {
   await request("/api/auth/logout", { method: "POST" });
 }
 
+// ---------------------------------------------------------------------------
+// "Sign in to Relist with Facebook" — an alternative sign-in to Relist
+// itself (NOT the Marketplace connection). Fully dark unless the backend
+// has a Meta app configured.
+
+/** Whether the backend offers Facebook sign-in at all. Anything other
+ *  than an explicit true (including an unreachable backend or an HTML
+ *  fallback body) means the button stays hidden. */
+export async function fetchAuthConfig(): Promise<{ facebookLoginEnabled: boolean }> {
+  const data = await request<{ facebookLoginEnabled?: unknown }>("/api/auth/config");
+  return { facebookLoginEnabled: data.facebookLoginEnabled === true };
+}
+
+/** Full-navigation URL for the Facebook OAuth round trip. */
+export function facebookLoginStartUrl(): string {
+  return apiUrl("/api/auth/facebook/start");
+}
+
+/** Exchange the one-time code shown after the Facebook round trip (the
+ *  PWA's cookie jar is not the browser that finished OAuth) for the
+ *  standard session. Validated like every other auth payload. */
+export async function loginWithFacebookCode(code: string): Promise<ApiUser> {
+  const data = await request<{ user?: unknown }>("/api/auth/facebook/code", {
+    method: "POST",
+    body: JSON.stringify({ code }),
+  });
+  return requireApiUser(data);
+}
+
 export async function fetchFacebookStatus(): Promise<SessionStatus> {
   const data = await request<{ status: SessionStatus }>("/api/facebook/status");
   return data.status;
