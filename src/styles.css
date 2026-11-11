@@ -904,6 +904,56 @@ button {
   margin: 0;
 }
 
+/* "Sign in to Relist with Facebook" block (only rendered when the
+   backend has a Meta app configured). */
+.auth-facebook {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-bottom: 14px;
+}
+
+.facebook-button {
+  display: block;
+  text-align: center;
+  text-decoration: none;
+  box-sizing: border-box;
+}
+
+.auth-facebook-note {
+  color: var(--subtext);
+  font-size: 13px;
+  line-height: 1.45;
+  margin: 0;
+  text-align: center;
+}
+
+.auth-code-form {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.auth-code-form input {
+  text-transform: uppercase;
+  letter-spacing: 3px;
+}
+
+.auth-divider {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  color: var(--subtext);
+  font-size: 13px;
+}
+
+.auth-divider::before,
+.auth-divider::after {
+  content: "";
+  flex: 1;
+  border-top: 1px solid var(--surface);
+}
+
 .link-button {
   background: none;
   border: none;
